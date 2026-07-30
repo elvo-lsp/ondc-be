@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// This LSP's own provider entity, returned as bpp/providers[] in /on_search.
+model Provider {
+  id          String   @id @default(cuid())
+  name        String
+  shortDesc   String
+  longDesc    String
+  createdAt   DateTime @default(now())
+
+  serviceableAreas ServiceableArea[]
+}
+
+// A delivery category this LSP can quote for, e.g. "Immediate Delivery" (child of
+// "Standard Delivery"). id matches the ONDC category id exactly so lookups are direct.
+model Category {
+  id             String   @id // e.g. "Immediate Delivery"
+  parentId       String? // e.g. "Standard Delivery"; null for top-level parents
+  parent         Category?  @relation("CategoryToParent", fields: [parentId], references: [id])
+  children       Category[] @relation("CategoryToParent")
+
+  shipmentType   String   @default("P2P") // "P2P" | "P2H2P"
+  // null on parent/grouping categories (e.g. "Standard Delivery") which aren't quoted
+  // directly - only their children are. See docs/ondc/search.md.
+  tatMinutes     Int?
+  basePrice      Decimal? @db.Decimal(10, 2)
+  currency       String   @default("INR")
+
+  serviceableAreas ServiceableArea[]
+}
+
+// A (provider, area_code, category) tuple the LSP is willing to serve. Both the
+// fulfillment start.area_code and end.area_code must have a row for the same category
+// for a /search to be serviceable — see docs/ondc/search.md.
+model ServiceableArea {
+  id         String   @id @default(cuid())
+  providerId String
+  provider   Provider @relation(fields: [providerId], references: [id])
+  areaCode   String
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  @@unique([providerId, areaCode, categoryId])
+  @@index([areaCode, categoryId])
+}
+
+enum SearchLogStatus {
+  RECEIVED
+  NO_MATCH
+  SENT
+  FAILED
+}
+
+// Audit trail for every /search received and the /on_search (if any) sent back.
+model SearchLog {
+  id              String          @id @default(cuid())
+  transactionId   String
+  messageId       String
+  requestContext  Json
+  requestPayload  Json
+  status          SearchLogStatus @default(RECEIVED)
+  responsePayload Json?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Authoritative dedup: a retried /search for the same transaction+message must not be
+  // reprocessed or trigger a second /on_search callback. See docs/ondc/search.md.
+  @@unique([transactionId, messageId])
+}
