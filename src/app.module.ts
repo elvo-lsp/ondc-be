@@ -2,11 +2,10 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { AuthModule } from './auth/auth.module';
-import { SearchModule } from './search/search.module';
+import { OndcModule } from './ondc/ondc.module';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), AuthModule, SearchModule],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), OndcModule],
   controllers: [AppController],
   providers: [AppService],
 })
