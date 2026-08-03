@@ -1,0 +1,62 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum RiderStatus {
+  PENDING_VERIFICATION
+  PROFILE_PENDING
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+}
+
+model Rider {
+  id        String      @id @default(uuid())
+  name      String
+  email     String      @unique
+  phone     String      @unique
+  status    RiderStatus @default(PENDING_VERIFICATION)
+  vendorId  String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  profile   RiderProfile?
+  documents RiderDocument[]
+}
+
+model RiderProfile {
+  id      String @id @default(uuid())
+  riderId String @unique
+  rider   Rider  @relation(fields: [riderId], references: [id])
+
+  dateOfBirth          DateTime?
+  temporaryAddress     String?
+  permanentAddress     String?
+  aadharNumber         String?
+  profileCompletedAt   DateTime?
+  documentsCompletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RiderDocument {
+  id         String   @id @default(uuid())
+  riderId    String
+  rider      Rider    @relation(fields: [riderId], references: [id])
+  type       String
+  filePath   String
+  uploadedAt DateTime @default(now())
+}
+
