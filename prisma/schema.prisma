@@ -14,7 +14,6 @@ datasource db {
 }
 
 enum RiderStatus {
-  PENDING_VERIFICATION
   PROFILE_PENDING
   UNDER_REVIEW
   APPROVED
@@ -26,7 +25,7 @@ model Rider {
   name      String
   email     String      @unique
   phone     String      @unique
-  status    RiderStatus @default(PENDING_VERIFICATION)
+  status    RiderStatus @default(PROFILE_PENDING)
   vendorId  String?
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt

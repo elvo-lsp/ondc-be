@@ -1,14 +1,20 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { randomInt } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../redis/redis.service';
-import { RiderStatus } from '../../../generated/prisma/client';
+import { Prisma, RiderStatus } from '../../../generated/prisma/client';
 import { RegisterRiderDto } from './dto/register-rider.dto';
 import { LoginRiderDto } from './dto/login-rider.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 const OTP_TTL_SECONDS = 5 * 60;
+
+interface OtpPayload {
+  code: string;
+  name?: string;
+  email?: string;
+}
 
 @Injectable()
 export class RiderAuthService {
@@ -28,18 +34,13 @@ export class RiderAuthService {
     });
 
     if (existing) {
-      // Don't reveal that this email/phone is already registered - resend an
-      // OTP to the account's real phone instead of erroring, and return the
-      // exact same response as a fresh signup (avoids account enumeration).
       await this.issueOtp(existing.phone);
       return { message: GENERIC_MESSAGE };
     }
 
-    const rider = await this.prisma.rider.create({
-      data: { name: dto.name, email: dto.email, phone: dto.phone },
-    });
-
-    await this.issueOtp(rider.phone);
+    // No Postgres write here - the rider is only created once the phone is
+    // proven via verifyOtp. Pending name/email travel with the OTP in Redis.
+    await this.issueOtp(dto.phone, { name: dto.name, email: dto.email });
 
     return { message: GENERIC_MESSAGE };
   }
@@ -49,8 +50,6 @@ export class RiderAuthService {
 
     const rider = await this.prisma.rider.findUnique({ where: { phone: dto.phone } });
 
-    // Same response whether or not the rider exists - only difference is
-    // whether an OTP actually gets issued behind the scenes.
     if (rider) {
       await this.issueOtp(rider.phone);
     }
@@ -59,27 +58,41 @@ export class RiderAuthService {
   }
 
   async verifyOtp(dto: VerifyOtpDto): Promise<{ accessToken: string; status: RiderStatus }> {
-    const rider = await this.prisma.rider.findUnique({ where: { phone: dto.phone } });
+    let rider = await this.prisma.rider.findUnique({ where: { phone: dto.phone } });
 
-    const storedCode = rider ? await this.redis.get(this.otpKey(dto.phone)) : null;
+    const raw = await this.redis.get(this.otpKey(dto.phone));
+    const stored: OtpPayload | null = raw ? JSON.parse(raw) : null;
 
-    // Same error whether the phone doesn't exist or the code is wrong -
-    // avoids account enumeration via a distinct "not found" response. Only
-    // delete the key on a correct match, so a mistyped code doesn't burn the
-    // real OTP - the rider can still retry until it expires.
-    if (!rider || !storedCode || storedCode !== dto.code) {
+    if (!stored || stored.code !== dto.code) {
       throw new UnauthorizedException('Invalid or expired OTP');
     }
 
     await this.redis.del(this.otpKey(dto.phone));
 
-    const status =
-      rider.status === RiderStatus.PENDING_VERIFICATION
-        ? RiderStatus.PROFILE_PENDING
-        : rider.status;
+    if (!rider) {
+      // register() always stores name/email for a brand-new phone - a
+      // missing one means a stale/malformed entry.
+      if (!stored.name || !stored.email) {
+        throw new UnauthorizedException('Invalid or expired OTP');
+      }
 
-    if (status !== rider.status) {
-      await this.prisma.rider.update({ where: { id: rider.id }, data: { status } });
+      try {
+        rider = await this.prisma.rider.create({
+          data: {
+            name: stored.name,
+            email: stored.email,
+            phone: dto.phone,
+            status: RiderStatus.PROFILE_PENDING,
+          },
+        });
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+          // Two phones raced to verify with the same email. Safe to reveal
+          // here (unlike register()) since this rider already proved phone ownership.
+          throw new ConflictException('This email is already associated with another account');
+        }
+        throw err;
+      }
     }
 
     const accessToken = await this.jwtService.signAsync({
@@ -88,13 +101,14 @@ export class RiderAuthService {
       app: 'onboarding',
     });
 
-    return { accessToken, status };
+    return { accessToken, status: rider.status };
   }
 
-  private async issueOtp(phone: string): Promise<void> {
+  private async issueOtp(phone: string, pending?: { name: string; email: string }): Promise<void> {
     const code = randomInt(100000, 1000000).toString();
+    const payload: OtpPayload = { code, ...pending };
 
-    await this.redis.set(this.otpKey(phone), code, 'EX', OTP_TTL_SECONDS);
+    await this.redis.set(this.otpKey(phone), JSON.stringify(payload), 'EX', OTP_TTL_SECONDS);
 
     // TODO: send via real SMS provider - stubbed for now
     this.logger.log(`OTP for ${phone}: ${code} (expires in ${OTP_TTL_SECONDS / 60}m)`);

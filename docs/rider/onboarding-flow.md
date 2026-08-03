@@ -10,7 +10,7 @@ Two separate rider-facing apps, same backend:
 1. Rider downloads the onboarding app.
 2. Enters name, email, phone number.
 3. Verifies via **phone OTP** (SMS) - not email. Email is collected for the later notification step only, not used for verification. Matches how existing platforms (e.g. Zomato Delivery Partner) verify riders during signup.
-4. On successful OTP verification, the rider is issued a limited-scope "onboarding" token - enough to access the profile/document screens, but not a fully onboarded rider yet.
+4. **No `Rider` row is created until this OTP verification actually succeeds** - name/email/phone are held in Redis alongside the OTP until then, not written to Postgres on signup. This is deliberate: avoids orphaned/unverified rows piling up from abandoned signups, bot attempts, or typos, and specifically fixes a bug where a typo'd phone number would otherwise permanently block re-registering with the corrected one (see git history/`onboarding-api.md` for the mechanism). On successful verification, the row is created directly at `PROFILE_PENDING` and the rider is issued a limited-scope "onboarding" token - enough to access the profile/document screens, but not a fully onboarded rider yet.
 5. Rider completes their profile and uploads required documents (exact document list TBD - will expand later; expect Aadhaar/PAN/Driving License/vehicle RC style documents based on industry norms).
 6. Submission moves the rider into a **pending review** state.
 7. Admin reviews the submitted profile/documents via the admin panel.
@@ -24,8 +24,9 @@ On rejection: rider stays blocked from the operations app (exact rejection/resub
 
 ## Rider status states (draft)
 
-- `PENDING_VERIFICATION` - signed up, OTP not yet verified.
-- `PROFILE_PENDING` - OTP verified, profile/documents not yet submitted.
+There is no "signed up, not yet verified" status - no row exists in that state at all (see above), so `PROFILE_PENDING` is the first reachable status.
+
+- `PROFILE_PENDING` - OTP verified (rider row just created), profile/documents not yet submitted.
 - `UNDER_REVIEW` - profile/documents submitted, awaiting admin decision.
 - `APPROVED` - admin approved, vendor assigned, can use the operations app.
 - `REJECTED` - admin rejected (resubmission flow TBD).
