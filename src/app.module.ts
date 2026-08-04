@@ -6,6 +6,7 @@ import { OndcModule } from './ondc/ondc.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { RiderModule } from './rider/rider.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { RiderModule } from './rider/rider.module';
     RedisModule,
     OndcModule,
     RiderModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],

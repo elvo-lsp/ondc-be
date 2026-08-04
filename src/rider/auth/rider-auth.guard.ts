@@ -22,7 +22,9 @@ export abstract class BaseRiderAuthGuard implements CanActivate {
   constructor(protected readonly jwtService: JwtService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest<Request & { rider?: RiderJwtPayload }>();
+    const req = context
+      .switchToHttp()
+      .getRequest<Request & { rider?: RiderJwtPayload }>();
     const authHeader = req.headers['authorization'];
 
     if (!authHeader?.startsWith('Bearer ')) {

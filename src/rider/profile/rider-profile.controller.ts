@@ -13,7 +13,10 @@ import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import { mkdirSync } from 'fs';
 import { Request } from 'express';
-import { OnboardingRiderAuthGuard, RiderJwtPayload } from '../auth/rider-auth.guard';
+import {
+  OnboardingRiderAuthGuard,
+  RiderJwtPayload,
+} from '../auth/rider-auth.guard';
 import { RiderProfileService } from './rider-profile.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UploadDocumentDto } from './dto/upload-document.dto';
@@ -31,7 +34,10 @@ export class RiderProfileController {
   }
 
   @Post()
-  updateProfile(@Req() req: Request & { rider: RiderJwtPayload }, @Body() dto: UpdateProfileDto) {
+  updateProfile(
+    @Req() req: Request & { rider: RiderJwtPayload },
+    @Body() dto: UpdateProfileDto,
+  ) {
     return this.riderProfileService.updateProfile(req.rider.sub, dto);
   }
 
@@ -55,6 +61,10 @@ export class RiderProfileController {
     @Body() dto: UploadDocumentDto,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    return this.riderProfileService.uploadDocument(req.rider.sub, dto.type, file.path);
+    return this.riderProfileService.uploadDocument(
+      req.rider.sub,
+      dto.type,
+      file.path,
+    );
   }
 }

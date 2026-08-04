@@ -1,22 +1,28 @@
 # Redis usage
 
-**First real Redis usage in this codebase** (2026-08-03) - `docker-compose.yml` had a Redis service from early on, but nothing in the app talked to it until rider OTPs moved here.
+Rider phone-verification OTPs are the only thing in Redis.
 
 ## What's stored
 
-Rider phone-verification OTPs (`src/rider/auth/rider-auth.service.ts`). Key pattern: `rider-otp:{phone}` → the 6-digit code, with a 5-minute TTL (`EX 300`).
+`src/rider/auth/rider-auth.service.ts`, key `rider-otp:{phone}`, 5-minute TTL (`EX 300`). The value is JSON, not just the code:
+
+```json
+{ "code": "123456", "name": "Rahul Kumar", "email": "rahul@example.com" }
+```
+
+`name` and `email` are only present for a first-time registration. They ride along with the OTP because no `Rider` row exists yet - it is created on successful verification, from exactly these values. A `login` re-verification stores `code` alone.
 
 ## Why Redis instead of Postgres for this
 
 - OTPs are inherently short-lived - Redis's native key expiry means no cleanup job is needed, unlike a DB table where expired rows would just accumulate.
 - Naturally a pure key-value lookup (phone -> current code), not relational data.
-- Losing this data (e.g. a Redis restart) is low-stakes - worst case the rider taps "resend," nothing durable is lost. This is a very different risk profile than e.g. data you'd need for guaranteed async callback delivery (see the ONDC `/on_search` discussion in project context) - that kind of data would need real durability guarantees; OTPs don't.
+- Losing this data (e.g. a Redis restart) is low-stakes - the rider retries, and nothing durable is gone. That is a very different risk profile from data backing a guaranteed async callback, which would need real durability; OTPs don't.
 
-There was a Postgres `RiderOtp` table before this (migration `move_otp_to_redis` dropped it). Rider identity/status/profile still live in Postgres - only the transient OTP itself moved.
+Only the transient OTP lives here; rider identity, status and profile are all Postgres. The one wrinkle is that a flush drops the pending name/email of anyone mid-registration, so they re-submit the registration form rather than just asking for a new code.
 
 ## Verification semantics
 
-A wrong code does **not** delete the stored OTP - only a successful match does (`GET` then conditional `DEL`, not `GETDEL`). This means a rider who mistypes their code can still retry with the correct one until it expires, matching the UX of the original Postgres-backed implementation.
+A wrong code does **not** delete the stored OTP - only a successful match does (`GET` then conditional `DEL`, not `GETDEL`). This means a rider who mistypes their code can still retry with the correct one until it expires.
 
 ## Not addressed here
 

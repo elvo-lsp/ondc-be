@@ -49,7 +49,9 @@ export class AuthService {
     const expiresMatch = authHeader.match(/expires="([^"]+)"/);
 
     if (!keyIdMatch) {
-      throw new UnauthorizedException('Malformed Authorization header: missing keyId');
+      throw new UnauthorizedException(
+        'Malformed Authorization header: missing keyId',
+      );
     }
 
     const [subscriberId, ukId] = keyIdMatch[1].split('|');

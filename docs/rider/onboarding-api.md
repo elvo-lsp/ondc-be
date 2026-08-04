@@ -11,7 +11,7 @@ Body: `{ name: string, email: string, phone: string }` (`phone` validated as an 
 ```json
 { "message": "If this is a new number, an OTP has been sent" }
 ```
-This is deliberate for two reasons: account-enumeration prevention (see `onboarding-flow.md`'s security debt section - never rely on the response to infer whether an account existed), and avoiding orphaned rows from abandoned signups or phone-number typos - re-registering with a corrected number before ever verifying just works, since nothing was persisted for the first attempt.
+This is deliberate for two reasons: account-enumeration prevention - never rely on the response to infer whether an account existed - and avoiding orphaned rows from abandoned signups or phone-number typos, since re-registering with a corrected number before ever verifying just works when nothing was persisted for the first attempt.
 
 ### `POST /rider/auth/login`
 Body: `{ phone: string }`.
@@ -24,7 +24,7 @@ Sends an OTP if a rider with this phone exists. Response is identical whether or
 ### `POST /rider/auth/verify-otp`
 Body: `{ phone: string, code: string }` (6 digits).
 
-Verifies the OTP (stored in Redis, see `docs/infra/redis.md`, 5-minute TTL). If this is the first successful verification for this phone (no `Rider` row yet), **creates the row now** using the name/email stashed alongside the OTP, directly at `status: PROFILE_PENDING` - there's no earlier "unverified" status. If the rider already exists (a `login` re-verification), their status is left untouched. Either way, issues a JWT and consumes the OTP.
+Verifies the OTP (stored in Redis, see `docs/infra/redis.md`, 5-minute TTL). If this is the first successful verification for this phone (no `Rider` row yet), **creates the row now** using the name/email stashed alongside the OTP, directly at `status: PROFILE_PENDING` - there's no earlier "unverified" status. The row's `partnerId` is resolved from the `DEFAULT_PARTNER_CODE` env var, since the onboarding app serves a single logistics partner today (see `docs/admin/README.md`); `vendorId` stays null until an admin approves the rider. If the rider already exists (a `login` re-verification), their status is left untouched. Either way, issues a JWT and consumes the OTP.
 ```json
 { "accessToken": "<jwt>", "status": "PROFILE_PENDING" }
 ```
@@ -45,10 +45,12 @@ No body. Returns the current rider's name, status, and step-completion flags - b
 ### `POST /rider/profile`
 Body: `{ dateOfBirth: string (ISO date), temporaryAddress: string, permanentAddress: string, aadharNumber: string }`.
 
+The Aadhaar number is not stored as given: it is encrypted, hashed for duplicate detection, and reduced to its last 4 digits before the row is written (see `docs/infra/aadhaar.md`). Submitting a number already registered to another rider returns `409`.
+
 Upserts the rider's `RiderProfile` row and marks `profileCompletedAt`. If documents are also already complete, auto-transitions rider status `PROFILE_PENDING -> UNDER_REVIEW` (see below) - there's no separate manual "submit" action.
 
 ### `POST /rider/profile/documents`
-`multipart/form-data`: a `file` field plus a `type` field (free-form string for now, e.g. `"AADHAR"` - no fixed enum yet since the required-document list isn't finalized, see `onboarding-flow.md`'s open questions).
+`multipart/form-data`: a `file` field plus a `type` field, e.g. `"AADHAR"`. There is no fixed enum - the required-document list isn't settled - but `type` is constrained to `[A-Za-z0-9 _-]` and 50 chars, because it reaches a `Content-Disposition` header on the admin side.
 
 Saves the file to local disk (`uploads/rider-documents/`, see `docs/infra/file-storage.md` - temporary, will move to cloud storage), creates a `RiderDocument` row, and marks `documentsCompletedAt` on the **first** upload (current heuristic: any one document counts as "documents complete" - will need revisiting once there's a real required-document list with more than one entry). Auto-transitions status the same way as above once both steps are done.
 
