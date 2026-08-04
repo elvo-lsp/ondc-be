@@ -1,31 +1,50 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { RiderStatus } from '../../../generated/prisma/client';
+import { Prisma, RiderStatus } from '../../../generated/prisma/client';
+import { AadhaarService } from '../../aadhaar/aadhaar.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
 @Injectable()
 export class RiderProfileService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly aadhaar: AadhaarService,
+  ) {}
 
   async updateProfile(riderId: string, dto: UpdateProfileDto) {
-    await this.prisma.riderProfile.upsert({
-      where: { riderId },
-      create: {
-        riderId,
-        dateOfBirth: new Date(dto.dateOfBirth),
-        temporaryAddress: dto.temporaryAddress,
-        permanentAddress: dto.permanentAddress,
-        aadharNumber: dto.aadharNumber,
-        profileCompletedAt: new Date(),
-      },
-      update: {
-        dateOfBirth: new Date(dto.dateOfBirth),
-        temporaryAddress: dto.temporaryAddress,
-        permanentAddress: dto.permanentAddress,
-        aadharNumber: dto.aadharNumber,
-        profileCompletedAt: new Date(),
-      },
-    });
+    const fields = {
+      dateOfBirth: new Date(dto.dateOfBirth),
+      temporaryAddress: dto.temporaryAddress,
+      permanentAddress: dto.permanentAddress,
+      aadhaarCiphertext: this.aadhaar.encrypt(dto.aadharNumber),
+      aadhaarHash: this.aadhaar.hash(dto.aadharNumber),
+      aadhaarLast4: this.aadhaar.last4(dto.aadharNumber),
+      profileCompletedAt: new Date(),
+    };
+
+    try {
+      await this.prisma.riderProfile.upsert({
+        where: { riderId },
+        create: { riderId, ...fields },
+        update: fields,
+      });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        // aadhaarHash is unique, so this is another rider having already
+        // registered the same Aadhaar number.
+        throw new ConflictException(
+          'This Aadhaar number is already registered to another rider',
+        );
+      }
+      throw err;
+    }
 
     await this.maybeMoveToUnderReview(riderId);
 
@@ -37,7 +56,9 @@ export class RiderProfileService {
       data: { riderId, type, filePath },
     });
 
-    const profile = await this.prisma.riderProfile.findUnique({ where: { riderId } });
+    const profile = await this.prisma.riderProfile.findUnique({
+      where: { riderId },
+    });
 
     if (!profile?.documentsCompletedAt) {
       await this.prisma.riderProfile.upsert({

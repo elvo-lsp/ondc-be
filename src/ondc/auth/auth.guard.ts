@@ -12,7 +12,9 @@ export class AuthGuard implements CanActivate {
   constructor(private readonly authService: AuthService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest<Request & { rawBody?: Buffer }>();
+    const req = context
+      .switchToHttp()
+      .getRequest<Request & { rawBody?: Buffer }>();
     const authHeader = req.headers['authorization'];
 
     if (!authHeader) {
@@ -25,7 +27,10 @@ export class AuthGuard implements CanActivate {
       );
     }
 
-    await this.authService.verifyRequest(authHeader, req.rawBody.toString('utf-8'));
+    await this.authService.verifyRequest(
+      authHeader,
+      req.rawBody.toString('utf-8'),
+    );
 
     return true;
   }

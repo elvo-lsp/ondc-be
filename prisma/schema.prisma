@@ -20,18 +20,96 @@ enum RiderStatus {
   REJECTED
 }
 
+/// A logistics organisation - the tenant boundary. Admins, vendors and riders
+/// each belong to exactly one. Seeded, never created at runtime; one today.
+model Partner {
+  id        String   @id @default(uuid())
+  name      String
+  code      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  admins  AdminUser[]
+  vendors Vendor[]
+  riders  Rider[]
+}
+
+/// An admin panel login. Seeded only - no self-signup, no roles yet.
+model AdminUser {
+  id           String  @id @default(uuid())
+  partnerId    String
+  partner      Partner @relation(fields: [partnerId], references: [id])
+  name         String
+  email        String  @unique
+  passwordHash String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reviewedRiders Rider[]  @relation("RiderReviewedBy")
+  createdVendors Vendor[] @relation("VendorCreatedBy")
+
+  @@index([partnerId])
+}
+
+/// A seller/store whose deliveries a partner's riders serve. NOT a tenant -
+/// vendors live inside a partner.
+model Vendor {
+  id        String  @id @default(uuid())
+  partnerId String
+  partner   Partner @relation(fields: [partnerId], references: [id])
+
+  name         String
+  contactName  String?
+  contactPhone String?
+  contactEmail String?
+  address      String?
+  isActive     Boolean @default(true)
+
+  /// Nullable for the same reason as Rider.reviewedByAdminId: an admin can be
+  /// removed without taking their vendors with them, and a vendor created by a
+  /// script rather than a person has no admin to point at.
+  createdByAdminId String?
+  createdByAdmin   AdminUser? @relation("VendorCreatedBy", fields: [createdByAdminId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  riders Rider[]
+
+  @@unique([partnerId, name])
+  @@index([partnerId])
+}
+
 model Rider {
   id        String      @id @default(uuid())
   name      String
   email     String      @unique
   phone     String      @unique
   status    RiderStatus @default(PROFILE_PENDING)
-  vendorId  String?
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+
+  /// Set at signup from DEFAULT_PARTNER_CODE. Scopes every admin query.
+  partnerId String
+  partner   Partner @relation(fields: [partnerId], references: [id])
+
+  /// Which seller this rider serves. Assigned by an admin at approval, so it
+  /// is null for anyone not yet approved.
+  vendorId String?
+  vendor   Vendor? @relation(fields: [vendorId], references: [id])
+
+  reviewedAt        DateTime?
+  reviewedByAdminId String?
+  reviewedByAdmin   AdminUser? @relation("RiderReviewedBy", fields: [reviewedByAdminId], references: [id])
+  rejectionReason   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   profile   RiderProfile?
   documents RiderDocument[]
+
+  @@index([partnerId, status])
+  @@index([vendorId])
 }
 
 model RiderProfile {
@@ -39,10 +117,17 @@ model RiderProfile {
   riderId String @unique
   rider   Rider  @relation(fields: [riderId], references: [id])
 
-  dateOfBirth          DateTime?
-  temporaryAddress     String?
-  permanentAddress     String?
-  aadharNumber         String?
+  dateOfBirth      DateTime?
+  temporaryAddress String?
+  permanentAddress String?
+
+  /// AES-256-GCM (iv || authTag || ciphertext). Never stored in plaintext -
+  /// see docs/infra/aadhaar.md.
+  aadhaarCiphertext Bytes?
+  /// HMAC of the number, for duplicate detection - you cannot query ciphertext.
+  aadhaarHash       String? @unique
+  aadhaarLast4      String?
+
   profileCompletedAt   DateTime?
   documentsCompletedAt DateTime?
 

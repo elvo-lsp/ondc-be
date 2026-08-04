@@ -15,12 +15,14 @@ Two separate rider-facing apps, same backend:
 6. Submission moves the rider into a **pending review** state.
 7. Admin reviews the submitted profile/documents via the admin panel.
 8. On approval:
-   - Admin assigns a **vendor** (tenant) to the rider - this is where multi-tenancy is decided; a rider belongs to exactly one vendor from this point on.
+   - Admin assigns a **vendor** (the seller/store this rider will serve) - a rider has no vendor until this point. Note this is *not* the tenancy decision; tenancy is the **partner**, set at signup. See [`../admin/README.md`](../admin/README.md).
    - Rider status moves to approved/onboarded.
-   - Rider receives an **email notification** that they're approved.
+   - Rider receives an **email notification** that they're approved. **Not implemented** - no mail provider is wired up yet.
 9. Rider downloads the operations app and logs in for real work.
 
-On rejection: rider stays blocked from the operations app (exact rejection/resubmission UX TBD).
+On rejection: rider stays blocked from the operations app. The admin's rejection reason is stored but not shown to the rider, and there's no resubmission path (still TBD).
+
+The admin half of steps 7-8 is built - see [`../admin/README.md`](../admin/README.md).
 
 ## Rider status states (draft)
 
@@ -31,16 +33,17 @@ There is no "signed up, not yet verified" status - no row exists in that state a
 - `APPROVED` - admin approved, vendor assigned, can use the operations app.
 - `REJECTED` - admin rejected (resubmission flow TBD).
 
-## Cross-surface dependency to watch
+This surface owns the `PROFILE_PENDING -> UNDER_REVIEW` transition only. Both transitions out of `UNDER_REVIEW` belong to the admin surface.
 
-Admin approval reads/writes the same rider record that the rider app's registration/profile step creates. Per our folder-structure approach (`admin/`, `rider/`, `ondc/` own only surface-specific controllers/auth; shared domain logic gets its own module once a concrete need appears - see project memory), **this is likely the first real trigger** for pulling rider persistence into a shared module rather than having it fully owned by `rider/profile`. Not extracted yet - revisit when the admin-side review/approve endpoints are actually built.
+## Shared with the admin surface
 
-## Known security debt (must fix before production)
+Both surfaces read and write the same `Rider` record, but they share a table rather than logic: this surface owns profile/document writes and the transition into `UNDER_REVIEW`, the admin surface owns the two transitions out of it, and neither needs the other's rules. Rider persistence therefore stays owned by `rider/profile` - Prisma is already the shared data-access layer, so a module in between would be a pass-through. See [`../admin/README.md`](../admin/README.md).
 
-From a security review on 2026-08-03:
+The one piece of genuinely shared logic is Aadhaar encryption, which is why `src/aadhaar/` sits outside both.
 
-- **OTP is logged in plaintext** (`rider-auth.service.ts`, `issueOtp`) - deliberate dev stub since the SMS provider isn't wired up yet, but it means anyone with log read access (log aggregators, staging environments, support tooling) can read a rider's OTP and complete login as them with zero possession of their phone. Must be removed/guarded (e.g. dev-only) before the real SMS provider goes in, not left in "just in case." **Still open** - moving OTP storage to Redis (see `docs/infra/redis.md`) did not change this risk; the logging call is independent of where the code is stored.
-- ~~Account enumeration~~ - **Fixed 2026-08-03.** `register`, `login`, and `verify-otp` now return identical responses regardless of whether the phone/email is already registered (silently resend OTP / same generic message instead of 409/404).
+## Known security debt
+
+Tracked in [`../infra/security-debt.md`](../infra/security-debt.md) with every other surface's, rather than duplicated here. The rider-specific entries are the plaintext OTP logging and the unthrottled OTP endpoints.
 
 ## Open questions / not yet decided
 
