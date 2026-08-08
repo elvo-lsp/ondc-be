@@ -8,10 +8,11 @@ import { createReadStream, existsSync } from 'fs';
 import { extname, resolve, sep } from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AadhaarService } from '../../aadhaar/aadhaar.service';
-import { Prisma, RiderStatus } from '../../../generated/prisma/client';
+import { Prisma, RiderStatus, DocumentStatus } from '../../../generated/prisma/client';
 import { ListRidersDto } from './dto/list-riders.dto';
 import { ApproveRiderDto } from './dto/approve-rider.dto';
 import { RejectRiderDto } from './dto/reject-rider.dto';
+import { ReviewDocumentDto } from './dto/review-document.dto';
 
 const UPLOAD_ROOT = resolve(process.cwd(), 'uploads', 'rider-documents');
 
@@ -59,7 +60,7 @@ export class AdminRidersService {
         : {}),
     };
 
-    const [total, riders] = await Promise.all([
+    const [total, rawRiders] = await Promise.all([
       this.prisma.rider.count({ where }),
       this.prisma.rider.findMany({
         where,
@@ -75,9 +76,21 @@ export class AdminRidersService {
           status: true,
           createdAt: true,
           vendor: { select: { id: true, name: true } },
+          _count: {
+            select: {
+              documents: {
+                where: { status: DocumentStatus.REJECTED },
+              },
+            },
+          },
         },
       }),
     ]);
+
+    const riders = rawRiders.map(({ _count, ...rest }) => ({
+      ...rest,
+      hasRejectedDocs: _count.documents > 0,
+    }));
 
     return { total, page, limit, riders };
   }
@@ -93,7 +106,15 @@ export class AdminRidersService {
         documents: {
           orderBy: { uploadedAt: 'asc' },
           // filePath omitted - a server-side path the panel must never see.
-          select: { id: true, type: true, uploadedAt: true },
+          select: {
+            id: true,
+            type: true,
+            uploadedAt: true,
+            status: true,
+            rejectionComment: true,
+            reviewedAt: true,
+            reviewedByAdmin: { select: { id: true, name: true } },
+          },
         },
       },
     });
@@ -176,6 +197,65 @@ export class AdminRidersService {
         status: true,
         rejectionReason: true,
         reviewedAt: true,
+      },
+    });
+  }
+
+  async reviewDocument(
+    partnerId: string,
+    adminId: string,
+    riderId: string,
+    documentId: string,
+    dto: ReviewDocumentDto,
+  ) {
+    // The rider must be UNDER_REVIEW for document-level decisions to make sense.
+    const rider = await this.prisma.rider.findFirst({
+      where: { id: riderId, partnerId },
+    });
+
+    if (!rider) {
+      throw new NotFoundException('Rider not found');
+    }
+
+    if (rider.status !== RiderStatus.UNDER_REVIEW) {
+      throw new BadRequestException(
+        `Rider is ${rider.status}; document review is only allowed while the rider is UNDER_REVIEW`,
+      );
+    }
+
+    if (dto.action === 'reject' && !dto.comment?.trim()) {
+      throw new BadRequestException(
+        'A rejection comment is required when rejecting a document',
+      );
+    }
+
+    const document = await this.prisma.riderDocument.findFirst({
+      where: { id: documentId, riderId },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+
+    return this.prisma.riderDocument.update({
+      where: { id: documentId },
+      data: {
+        status:
+          dto.action === 'approve'
+            ? DocumentStatus.APPROVED
+            : DocumentStatus.REJECTED,
+        rejectionComment:
+          dto.action === 'reject' ? (dto.comment ?? null) : null,
+        reviewedAt: new Date(),
+        reviewedByAdminId: adminId,
+      },
+      select: {
+        id: true,
+        type: true,
+        status: true,
+        rejectionComment: true,
+        reviewedAt: true,
+        reviewedByAdmin: { select: { id: true, name: true } },
       },
     });
   }

@@ -20,6 +20,12 @@ enum RiderStatus {
   REJECTED
 }
 
+enum DocumentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 /// A logistics organisation - the tenant boundary. Admins, vendors and riders
 /// each belong to exactly one. Seeded, never created at runtime; one today.
 model Partner {
@@ -46,8 +52,9 @@ model AdminUser {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  reviewedRiders Rider[]  @relation("RiderReviewedBy")
-  createdVendors Vendor[] @relation("VendorCreatedBy")
+  reviewedRiders    Rider[]         @relation("RiderReviewedBy")
+  createdVendors    Vendor[]        @relation("VendorCreatedBy")
+  reviewedDocuments RiderDocument[] @relation("DocumentReviewedBy")
 
   @@index([partnerId])
 }
@@ -136,11 +143,20 @@ model RiderProfile {
 }
 
 model RiderDocument {
-  id         String   @id @default(uuid())
+  id         String         @id @default(uuid())
   riderId    String
-  rider      Rider    @relation(fields: [riderId], references: [id])
+  rider      Rider          @relation(fields: [riderId], references: [id])
   type       String
   filePath   String
-  uploadedAt DateTime @default(now())
+  uploadedAt DateTime       @default(now())
+
+  /// Admin review of this specific document.
+  status           DocumentStatus @default(PENDING)
+  rejectionComment String?
+  reviewedAt       DateTime?
+  reviewedByAdminId String?
+  reviewedByAdmin   AdminUser? @relation("DocumentReviewedBy", fields: [reviewedByAdminId], references: [id])
+
+  @@index([riderId])
 }
 

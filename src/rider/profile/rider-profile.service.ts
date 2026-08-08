@@ -56,19 +56,32 @@ export class RiderProfileService {
       data: { riderId, type, filePath },
     });
 
-    const profile = await this.prisma.riderProfile.findUnique({
+    const docs = await this.prisma.riderDocument.findMany({
       where: { riderId },
+      select: { type: true },
     });
 
-    if (!profile?.documentsCompletedAt) {
-      await this.prisma.riderProfile.upsert({
-        where: { riderId },
-        create: { riderId, documentsCompletedAt: new Date() },
-        update: { documentsCompletedAt: new Date() },
-      });
-    }
+    const uploadedTypes = new Set(docs.map((d) => d.type));
+    const hasAllRequired =
+      uploadedTypes.has('AADHAAR') &&
+      uploadedTypes.has('PAN') &&
+      uploadedTypes.has('DRIVING_LICENSE');
 
-    await this.maybeMoveToUnderReview(riderId);
+    if (hasAllRequired) {
+      const profile = await this.prisma.riderProfile.findUnique({
+        where: { riderId },
+      });
+
+      if (!profile?.documentsCompletedAt) {
+        await this.prisma.riderProfile.upsert({
+          where: { riderId },
+          create: { riderId, documentsCompletedAt: new Date() },
+          update: { documentsCompletedAt: new Date() },
+        });
+      }
+
+      await this.maybeMoveToUnderReview(riderId);
+    }
 
     return { message: 'Document uploaded' };
   }
@@ -76,7 +89,10 @@ export class RiderProfileService {
   async getStatus(riderId: string) {
     const rider = await this.prisma.rider.findUnique({
       where: { id: riderId },
-      include: { profile: true },
+      include: { 
+        profile: true,
+        documents: { select: { type: true } }
+      },
     });
 
     if (!rider) {
@@ -85,9 +101,12 @@ export class RiderProfileService {
 
     return {
       name: rider.name,
+      email: rider.email,
+      phone: rider.phone,
       status: rider.status,
       profileCompleted: !!rider.profile?.profileCompletedAt,
       documentsCompleted: !!rider.profile?.documentsCompletedAt,
+      uploadedDocuments: rider.documents.map(d => d.type),
     };
   }
 

@@ -19,6 +19,7 @@ import { AdminRidersService } from './admin-riders.service';
 import { ListRidersDto } from './dto/list-riders.dto';
 import { ApproveRiderDto } from './dto/approve-rider.dto';
 import { RejectRiderDto } from './dto/reject-rider.dto';
+import { ReviewDocumentDto } from './dto/review-document.dto';
 
 @Controller('admin/riders')
 @UseGuards(AdminAuthGuard)
@@ -65,6 +66,23 @@ export class AdminRidersController {
       req.admin.partnerId,
       req.admin.sub,
       id,
+      dto,
+    );
+  }
+
+  @Post(':id/documents/:documentId/review')
+  @HttpCode(HttpStatus.OK)
+  reviewDocument(
+    @Req() req: AdminRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('documentId', ParseUUIDPipe) documentId: string,
+    @Body() dto: ReviewDocumentDto,
+  ) {
+    return this.adminRidersService.reviewDocument(
+      req.admin.partnerId,
+      req.admin.sub,
+      id,
+      documentId,
       dto,
     );
   }

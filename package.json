@@ -33,6 +33,7 @@
     "axios": "^1.19.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "dotenv": "^17.4.2",
     "ioredis": "^6.0.0",
     "ondc-crypto-sdk-nodejs": "^2.1.1",
     "prisma": "^7.9.1",
