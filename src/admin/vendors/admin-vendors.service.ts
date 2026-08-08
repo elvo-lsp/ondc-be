@@ -84,6 +84,9 @@ export class AdminVendorsService {
       return await this.prisma.vendor.update({
         where: { id, partnerId },
         data: dto,
+        // Same shape as list/create/findOne, so a client can treat one Vendor
+        // type as the response of every vendor endpoint.
+        include: { createdByAdmin: { select: { id: true, name: true } } },
       });
     } catch (err) {
       if (isPrismaError(err, 'P2025')) {
