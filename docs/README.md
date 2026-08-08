@@ -10,8 +10,8 @@ Organized by surface, matching `src/` - if you're working on a feature, check th
 ## Index
 
 ### rider/
-- [onboarding-flow.md](./rider/onboarding-flow.md) - the two-app (Play Store onboarding app + private operations app) rider signup/verification/admin-approval flow, including status states and open questions.
-- [onboarding-api.md](./rider/onboarding-api.md) - API reference for `rider/auth` and `rider/profile`: endpoints, request/response shapes, and the status auto-transition logic.
+- [onboarding-flow.md](./rider/onboarding-flow.md) - the two-app (Play Store onboarding app + private operations app) rider signup/verification/admin-approval flow, including status states, per-document rejection and re-upload, and open questions.
+- [onboarding-api.md](./rider/onboarding-api.md) - API reference for `rider/auth`, `rider/documents` and `rider/profile`: endpoints, request/response shapes, the two per-app logins, document versioning, and the status auto-transition logic.
 
 ### admin/
 - [README.md](./admin/README.md) - how the admin domain is modelled: partner vs. vendor, why the tenant column exists before multi-partner does, how `partnerId` scoping is enforced, the review/approve/reject flow, and what's deliberately not built.

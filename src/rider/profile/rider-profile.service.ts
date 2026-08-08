@@ -1,21 +1,40 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { Prisma, RiderStatus } from '../../../generated/prisma/client';
+import {
+  DocumentStatus,
+  Prisma,
+  RiderStatus,
+} from '../../../generated/prisma/client';
 import { AadhaarService } from '../../aadhaar/aadhaar.service';
+import { RiderDocumentsService } from '../documents/rider-documents.service';
+import { REQUIRED_DOCUMENT_TYPES } from '../documents/required-documents';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+
+/**
+ * `APPROVED` is excluded so the documents behind an approval cannot move under it;
+ * `REJECTED` because a rider-level rejection is terminal.
+ */
+const EDITABLE_STATUSES: RiderStatus[] = [
+  RiderStatus.PROFILE_PENDING,
+  RiderStatus.UNDER_REVIEW,
+];
 
 @Injectable()
 export class RiderProfileService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly aadhaar: AadhaarService,
+    private readonly documents: RiderDocumentsService,
   ) {}
 
   async updateProfile(riderId: string, dto: UpdateProfileDto) {
+    await this.requireEditableRider(riderId);
+
     const fields = {
       dateOfBirth: new Date(dto.dateOfBirth),
       temporaryAddress: dto.temporaryAddress,
@@ -51,53 +70,76 @@ export class RiderProfileService {
     return { message: 'Profile updated' };
   }
 
+  /**
+   * Never overwrites: inserts a new row and retires the previous live upload,
+   * so an admin can still see what was rejected and what replaced it.
+   */
   async uploadDocument(riderId: string, type: string, filePath: string) {
-    await this.prisma.riderDocument.create({
-      data: { riderId, type, filePath },
-    });
+    await this.requireEditableRider(riderId);
 
-    const docs = await this.prisma.riderDocument.findMany({
-      where: { riderId },
-      select: { type: true },
-    });
-
-    const uploadedTypes = new Set(docs.map((d) => d.type));
-    const hasAllRequired =
-      uploadedTypes.has('AADHAAR') &&
-      uploadedTypes.has('PAN') &&
-      uploadedTypes.has('DRIVING_LICENSE');
-
-    if (hasAllRequired) {
-      const profile = await this.prisma.riderProfile.findUnique({
-        where: { riderId },
+    await this.prisma.$transaction(async (tx) => {
+      const created = await tx.riderDocument.create({
+        data: { riderId, type, filePath },
       });
 
-      if (!profile?.documentsCompletedAt) {
-        await this.prisma.riderProfile.upsert({
-          where: { riderId },
-          create: { riderId, documentsCompletedAt: new Date() },
-          update: { documentsCompletedAt: new Date() },
-        });
-      }
+      // updateMany, not update-the-row-we-read: retires *every* live row of this
+      // type with no read to go stale, so concurrent uploads cannot strand a live
+      // row that nothing will ever supersede.
+      await tx.riderDocument.updateMany({
+        where: {
+          riderId,
+          type,
+          supersededAt: null,
+          id: { not: created.id },
+          status: { not: DocumentStatus.APPROVED },
+        },
+        data: { supersededAt: new Date(), supersededById: created.id },
+      });
 
-      await this.maybeMoveToUnderReview(riderId);
-    }
+      // Checked after the write and inside the transaction, so it rolls back.
+      // Checking first would be a read a concurrent approval could invalidate.
+      const approvedStillLive = await tx.riderDocument.count({
+        where: {
+          riderId,
+          type,
+          supersededAt: null,
+          id: { not: created.id },
+          status: DocumentStatus.APPROVED,
+        },
+      });
+
+      if (approvedStillLive > 0) {
+        throw new BadRequestException(
+          'This document has already been approved and cannot be replaced',
+        );
+      }
+    });
+
+    await this.documents.syncCompletion(riderId);
+    await this.maybeMoveToUnderReview(riderId);
 
     return { message: 'Document uploaded' };
   }
 
+  /**
+   * Backs the onboarding app's home screen. Per-document status is included
+   * because a rejected document is the rider's cue to re-upload it - unlike
+   * `Rider.rejectionReason`, which is rider-level and stays admin-only.
+   */
   async getStatus(riderId: string) {
     const rider = await this.prisma.rider.findUnique({
       where: { id: riderId },
-      include: { 
-        profile: true,
-        documents: { select: { type: true } }
-      },
+      include: { profile: { select: { profileCompletedAt: true } } },
     });
 
     if (!rider) {
       throw new NotFoundException('Rider not found');
     }
+
+    const [documents, outstandingDocuments] = await Promise.all([
+      this.documents.listCurrent(riderId),
+      this.documents.outstandingFor(riderId),
+    ]);
 
     return {
       name: rider.name,
@@ -105,9 +147,31 @@ export class RiderProfileService {
       phone: rider.phone,
       status: rider.status,
       profileCompleted: !!rider.profile?.profileCompletedAt,
-      documentsCompleted: !!rider.profile?.documentsCompletedAt,
-      uploadedDocuments: rider.documents.map(d => d.type),
+      documentsCompleted: outstandingDocuments.length === 0,
+      canEdit: EDITABLE_STATUSES.includes(rider.status),
+      requiredDocuments: [...REQUIRED_DOCUMENT_TYPES],
+      outstandingDocuments,
+      documents,
     };
+  }
+
+  private async requireEditableRider(riderId: string) {
+    const rider = await this.prisma.rider.findUnique({
+      where: { id: riderId },
+      select: { id: true, status: true },
+    });
+
+    if (!rider) {
+      throw new NotFoundException('Rider not found');
+    }
+
+    if (!EDITABLE_STATUSES.includes(rider.status)) {
+      throw new BadRequestException(
+        `Your application is ${rider.status} and can no longer be changed`,
+      );
+    }
+
+    return rider;
   }
 
   private async maybeMoveToUnderReview(riderId: string): Promise<void> {

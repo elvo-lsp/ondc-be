@@ -62,23 +62,58 @@ Admin panel
 
 Approving and assigning a vendor are one action, not two - `POST /admin/riders/:id/approve` takes the `vendorId`. There is no state where a rider is approved but unassigned.
 
-Reviewing an application: queue (`?status=UNDER_REVIEW`, oldest first) → detail → view each document through the authenticated streaming endpoint → approve with a vendor, or reject with a reason. Both decisions stamp `reviewedAt` and `reviewedByAdminId`.
+Reviewing an application: queue (`?status=UNDER_REVIEW`, oldest first) → detail → view each document through the authenticated streaming endpoint → decide each document → approve with a vendor, or reject with a reason. Both rider-level decisions stamp `reviewedAt` and `reviewedByAdminId`.
+
+### Two levels of rejection
+
+Rejecting a *document* and rejecting a *rider* are different actions with different consequences, and conflating them is the easy mistake here:
+
+| | `POST /admin/riders/:id/documents/:documentId/review` | `POST /admin/riders/:id/reject` |
+| --- | --- | --- |
+| Writes | `RiderDocument.status`, `rejectionComment` | `Rider.status`, `rejectionReason` |
+| Rider status after | unchanged (`UNDER_REVIEW`) | `REJECTED` |
+| Shown to the rider? | **yes** - it's the instruction to re-upload | no - audit record only |
+| Rider can act on it? | yes, by uploading a replacement | no, terminal |
+
+A document rejection deliberately leaves the rider in `UNDER_REVIEW`. There's no fifth `RiderStatus` for it: it would behave identically to `UNDER_REVIEW`, and sending the rider back to `PROFILE_PENDING` would lose the fact that they had already submitted. The onboarding app drives its re-upload prompt off `outstandingDocuments`, not off `status`.
+
+Because `rejectionComment` reaches the rider, it is written as an instruction ("photo is blurred, re-upload") rather than an internal note. `Rider.rejectionReason` is the opposite and must stay admin-only.
+
+### Documents are versioned, not overwritten
+
+A rider replacing a rejected document inserts a new `RiderDocument` row; the old one gets `supersededAt` and `supersededById` pointing at its replacement. Consequences for this surface:
+
+- `GET /admin/riders/:id` returns **every** upload including superseded ones - that history is the point, so a reviewer can see what was rejected and what came back. `supersededAt: null` marks the one that currently counts.
+- `POST .../review` refuses a superseded document (`400`), and does so as part of the write rather than as a check before it, so a simultaneous re-upload cannot land a decision on a file the rider has already replaced.
+- The rejected-document flag on the list endpoint counts only live rows, so a rejection the rider has already fixed stops flagging them.
+- Old files are never deleted. Nothing prunes them yet - tracked in [../rider/onboarding-flow.md](../rider/onboarding-flow.md).
+
+### Approval requires complete documents
+
+`POST /admin/riders/:id/approve` returns `400` if any required document type is outstanding (never uploaded, or live upload rejected). This blocks the obvious sequencing mistake - rejecting a document and then approving the rider anyway, which would onboard them on a scan the reviewer had just refused.
+
+`GET /admin/riders/:id` returns the same `outstandingDocuments` list, computed the same way, so the panel can disable the approve button for exactly the riders the server would refuse. Don't drive that off `profile.documentsCompletedAt` - it's a denormalised flag with a writer on both surfaces, and nothing that makes a decision reads it.
 
 ## What is deliberately missing
 
 - **The approval email.** `onboarding-flow.md` step 8 says the rider is emailed on approval. No mail provider is wired up, so it does not happen; there is a `TODO` at the write site in `AdminRidersService.approve`.
-- **Resubmission.** `REJECTED` is terminal through the API. The stored `rejectionReason` is an audit record - not shown to the rider, and there is no path back to `UNDER_REVIEW`.
+- **Resubmission after a rider-level rejection.** `REJECTED` is terminal through the API. The stored `rejectionReason` is an audit record - not shown to the rider, and there is no path back to `UNDER_REVIEW`. (Per-*document* rejection and re-upload *is* built - see above.)
 - **Reversing a decision.** Approve and reject are reachable only from `UNDER_REVIEW`, so an approved rider cannot be un-approved or moved to a different vendor through the API. Add it when there is a real operational need, with whatever audit record it should leave.
-- **A required-document list.** `RiderDocument.type` is still free-form and any single upload marks documents complete, so a reviewing admin cannot rely on a fixed set being present.
 - **An audit trail for vendor edits.** Creation records `createdByAdminId`; updates record nothing. See [../infra/security-debt.md](../infra/security-debt.md).
+- **Bulk document decisions.** Each document is reviewed one call at a time; there is no "approve all".
 
-## Why there is no shared rider module
+## Why there is (almost) no shared rider module
 
-Rider persistence is owned by `rider/profile`, and the admin surface reaches the same table through Prisma directly. That is deliberate: this surface's rider work is reads plus one status write, Prisma is already the shared data-access layer, and a module in between would be a pass-through wrapper.
+Rider persistence is owned by `rider/profile`, and the admin surface reaches the same table through Prisma directly. That is deliberate: this surface's rider work is reads plus status writes, Prisma is already the shared data-access layer, and a module in between would be a pass-through wrapper.
 
 The transition rules are split rather than shared - the rider surface owns `PROFILE_PENDING -> UNDER_REVIEW`, this one owns both transitions out of `UNDER_REVIEW`, and neither needs the other's logic.
 
-The bar for extracting a module is shared *business* logic, not a shared table. `src/aadhaar/` is the only thing that meets it: the rider app encrypts, the panel decrypts, so it belongs to neither.
+The bar for extracting a module is shared *business* logic, not a shared table. Two things meet it:
+
+- **`src/aadhaar/`** - the rider app encrypts, the panel decrypts, so it belongs to neither.
+- **`src/rider/documents/`** - added with per-document review. `RiderProfile.documentsCompletedAt` now has a writer on **both** sides: the rider by uploading, an admin by rejecting or approving a single document. `RiderDocumentsService.syncCompletion` owns that recompute (and `outstandingFor`, which the approve guard uses) so the rule lives in one place instead of drifting between the two write sites. It is intentionally tiny - the required-type list plus pure helpers plus one recompute - and it is *not* a rider-persistence wrapper.
+
+Note the failure mode this avoids: if the admin surface rejected a document without recomputing `documentsCompletedAt`, the rider app would keep showing documents as done while an admin waited for a re-upload that the rider had no reason to send.
 
 ## Seeding
 

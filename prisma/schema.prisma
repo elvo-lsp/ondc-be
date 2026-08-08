@@ -20,6 +20,8 @@ enum RiderStatus {
   REJECTED
 }
 
+/// Independent of RiderStatus: a rejected document asks the rider to re-upload
+/// that one, it does not reject the rider.
 enum DocumentStatus {
   PENDING
   APPROVED
@@ -89,9 +91,11 @@ model Vendor {
 }
 
 model Rider {
-  id        String      @id @default(uuid())
-  name      String
-  email     String      @unique
+  id   String @id @default(uuid())
+  name String
+  /// Always lowercased - see RiderAuthService.normaliseEmail. The unique index is
+  /// case-sensitive, so normalising on write is what makes one address one rider.
+  email String @unique
   phone     String      @unique
   status    RiderStatus @default(PROFILE_PENDING)
 
@@ -142,21 +146,39 @@ model RiderProfile {
   updatedAt DateTime @updatedAt
 }
 
+/// Rows are never deleted or overwritten - a re-upload of the same `type` inserts
+/// a new row and supersedes the old, so the review history survives.
+/// See docs/rider/onboarding-api.md.
 model RiderDocument {
-  id         String         @id @default(uuid())
+  id         String   @id @default(uuid())
   riderId    String
-  rider      Rider          @relation(fields: [riderId], references: [id])
+  rider      Rider    @relation(fields: [riderId], references: [id])
   type       String
   filePath   String
-  uploadedAt DateTime       @default(now())
+  uploadedAt DateTime @default(now())
 
   /// Admin review of this specific document.
-  status           DocumentStatus @default(PENDING)
-  rejectionComment String?
-  reviewedAt       DateTime?
+  status            DocumentStatus @default(PENDING)
+  rejectionComment  String?
+  reviewedAt        DateTime?
   reviewedByAdminId String?
-  reviewedByAdmin   AdminUser? @relation("DocumentReviewedBy", fields: [reviewedByAdminId], references: [id])
+  reviewedByAdmin   AdminUser?     @relation("DocumentReviewedBy", fields: [reviewedByAdminId], references: [id])
+
+  /// Null means this is the row that counts for completeness and review; non-null
+  /// is history and must not be re-decided.
+  supersededAt   DateTime?
+  /// The replacement. Deliberately **not** unique: an upload retires every live row
+  /// of its type in one statement, so a race that left two behind self-heals. A
+  /// unique constraint would make that statement fail and strand a row live.
+  supersededById String?
+  supersededBy   RiderDocument?  @relation("DocumentSupersedes", fields: [supersededById], references: [id])
+  supersedes     RiderDocument[] @relation("DocumentSupersedes")
 
   @@index([riderId])
+  /// Backs the "current document per type" lookup every completeness check uses.
+  @@index([riderId, type, supersededAt])
+  /// Postgres does not index a foreign key for you; walked to follow a rejected
+  /// document forward to its replacement.
+  @@index([supersededById])
 }
 

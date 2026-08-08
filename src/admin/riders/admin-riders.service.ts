@@ -8,7 +8,12 @@ import { createReadStream, existsSync } from 'fs';
 import { extname, resolve, sep } from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AadhaarService } from '../../aadhaar/aadhaar.service';
-import { Prisma, RiderStatus, DocumentStatus } from '../../../generated/prisma/client';
+import {
+  Prisma,
+  RiderStatus,
+  DocumentStatus,
+} from '../../../generated/prisma/client';
+import { RiderDocumentsService } from '../../rider/documents/rider-documents.service';
 import { ListRidersDto } from './dto/list-riders.dto';
 import { ApproveRiderDto } from './dto/approve-rider.dto';
 import { RejectRiderDto } from './dto/reject-rider.dto';
@@ -39,6 +44,7 @@ export class AdminRidersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly aadhaar: AadhaarService,
+    private readonly documents: RiderDocumentsService,
   ) {}
 
   async list(partnerId: string, query: ListRidersDto) {
@@ -78,8 +84,13 @@ export class AdminRidersService {
           vendor: { select: { id: true, name: true } },
           _count: {
             select: {
+              // Live uploads only - a rejection the rider has already replaced
+              // must not keep flagging the row.
               documents: {
-                where: { status: DocumentStatus.REJECTED },
+                where: {
+                  status: DocumentStatus.REJECTED,
+                  supersededAt: null,
+                },
               },
             },
           },
@@ -103,6 +114,8 @@ export class AdminRidersService {
         profile: { omit: { aadhaarHash: true } },
         vendor: { select: { id: true, name: true } },
         reviewedByAdmin: { select: { id: true, name: true } },
+        // Every upload, superseded included, so a reviewer can see what was
+        // rejected and what replaced it. `supersededAt: null` is the current one.
         documents: {
           orderBy: { uploadedAt: 'asc' },
           // filePath omitted - a server-side path the panel must never see.
@@ -114,6 +127,8 @@ export class AdminRidersService {
             rejectionComment: true,
             reviewedAt: true,
             reviewedByAdmin: { select: { id: true, name: true } },
+            supersededAt: true,
+            supersededById: true,
           },
         },
       },
@@ -123,10 +138,15 @@ export class AdminRidersService {
       throw new NotFoundException('Rider not found');
     }
 
+    // Computed live, not read from `profile.documentsCompletedAt` - a flag two
+    // surfaces write. This is what the approve guard checks, so the panel and the
+    // server cannot disagree.
+    const outstandingDocuments = await this.documents.outstandingFor(rider.id);
+
     const { profile, ...rest } = rider;
 
     if (!profile) {
-      return { ...rest, profile: null };
+      return { ...rest, outstandingDocuments, profile: null };
     }
 
     const { aadhaarCiphertext, ...profileFields } = profile;
@@ -137,7 +157,11 @@ export class AdminRidersService {
       this.aadhaar.logAccess(adminId, rider.id);
     }
 
-    return { ...rest, profile: { ...profileFields, aadhaarNumber } };
+    return {
+      ...rest,
+      outstandingDocuments,
+      profile: { ...profileFields, aadhaarNumber },
+    };
   }
 
   async approve(
@@ -159,6 +183,15 @@ export class AdminRidersService {
     if (!vendor.isActive) {
       throw new BadRequestException(
         'Cannot assign a rider to an inactive vendor',
+      );
+    }
+
+    // Blocks rejecting a document and then approving the rider anyway.
+    const outstanding = await this.documents.outstandingFor(rider.id);
+
+    if (outstanding.length > 0) {
+      throw new BadRequestException(
+        `Rider still owes documents: ${outstanding.join(', ')}`,
       );
     }
 
@@ -231,14 +264,18 @@ export class AdminRidersService {
 
     const document = await this.prisma.riderDocument.findFirst({
       where: { id: documentId, riderId },
+      select: { id: true },
     });
 
     if (!document) {
       throw new NotFoundException('Document not found');
     }
 
-    return this.prisma.riderDocument.update({
-      where: { id: documentId },
+    // `supersededAt: null` is in the WHERE of the write itself rather than a check
+    // before it, so a rider re-uploading concurrently cannot have a decision
+    // recorded against a file they already replaced - we just update 0 rows.
+    const { count } = await this.prisma.riderDocument.updateMany({
+      where: { id: documentId, riderId, supersededAt: null },
       data: {
         status:
           dto.action === 'approve'
@@ -249,6 +286,16 @@ export class AdminRidersService {
         reviewedAt: new Date(),
         reviewedByAdminId: adminId,
       },
+    });
+
+    if (count === 0) {
+      throw new BadRequestException(
+        'This document has been replaced by a newer upload; review that one instead',
+      );
+    }
+
+    const reviewed = await this.prisma.riderDocument.findUniqueOrThrow({
+      where: { id: documentId },
       select: {
         id: true,
         type: true,
@@ -258,6 +305,11 @@ export class AdminRidersService {
         reviewedByAdmin: { select: { id: true, name: true } },
       },
     });
+
+    // A rejection makes a finished rider incomplete again, so the flag must follow.
+    const documentsCompleted = await this.documents.syncCompletion(riderId);
+
+    return { ...reviewed, documentsCompleted };
   }
 
   async getDocumentFile(

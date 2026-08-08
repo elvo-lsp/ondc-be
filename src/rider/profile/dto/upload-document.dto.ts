@@ -1,14 +1,15 @@
-import { IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsIn } from 'class-validator';
+import { REQUIRED_DOCUMENT_TYPES } from '../../documents/required-documents';
+// `import type` because it appears in a decorated signature - emitDecoratorMetadata
+// would otherwise emit a runtime import for a type-only symbol.
+import type { RequiredDocumentType } from '../../documents/required-documents';
 
 export class UploadDocumentDto {
-  // Reaches a Content-Disposition header on the admin side, where a quote or
-  // newline breaks the response. Still free-form pending a document list.
-  @IsString()
-  @MinLength(1)
-  @MaxLength(50)
-  @Matches(/^[A-Za-z0-9 _-]+$/, {
-    message:
-      'type may only contain letters, numbers, spaces, hyphens and underscores',
+  // An allowlist is both the domain rule and a stronger version of the character
+  // constraint it replaced: `type` reaches a Content-Disposition header on the
+  // admin side. That read path still sanitises, for rows written before this.
+  @IsIn(REQUIRED_DOCUMENT_TYPES, {
+    message: `type must be one of: ${REQUIRED_DOCUMENT_TYPES.join(', ')}`,
   })
-  type: string;
+  type: RequiredDocumentType;
 }

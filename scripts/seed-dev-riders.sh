@@ -64,11 +64,31 @@ submit_profile() {
     -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d "{\"dateOfBirth\":\"$dob\",\"temporaryAddress\":\"$temp\",\"permanentAddress\":\"$perm\",\"aadharNumber\":\"$aadhaar\"}"
 
-  for type in AADHAR PAN DRIVING_LICENSE; do
+  # These must match REQUIRED_DOCUMENT_TYPES exactly - the upload DTO validates
+  # against that allowlist, and a rider is only complete once all three are in.
+  for type in AADHAAR PAN DRIVING_LICENSE; do
     curl -sS -o /dev/null -X POST "$API/rider/profile/documents" \
       -H "Authorization: Bearer $token" \
       -F "type=$type" -F "file=@$TMP/doc.png"
   done
+}
+
+# Rejects one of a rider's documents, leaving them UNDER_REVIEW with an
+# outstanding re-upload - the state the onboarding app shows a comment for.
+reject_document() {
+  local rider_id="$1" type="$2" comment="$3" doc_id
+
+  doc_id=$(curl -sS "$API/admin/riders/$rider_id" -H "Authorization: Bearer $TOKEN" \
+    | python3 -c "
+import sys,json
+want=sys.argv[1]
+docs=json.load(sys.stdin)['documents']
+print(next((d['id'] for d in docs if d['type']==want and not d['supersededAt']), ''))
+" "$type")
+
+  curl -sS -o /dev/null -X POST "$API/admin/riders/$rider_id/documents/$doc_id/review" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"action\":\"reject\",\"comment\":\"$comment\"}"
 }
 
 # -G with --data-urlencode, not string interpolation: a phone starts with '+',
@@ -114,11 +134,18 @@ V3=$(ensure_vendor 'More Supermarket Andheri' 'Rakesh Gupta' '+919834567890' 'An
 echo "    $V1 / $V2 / $V3"
 
 # name|email|phone|dob|temp address|permanent address|aadhaar|target status|vendor|reason
+#
+# "target status" is a scenario, not only a RiderStatus: DOC_REJECTED leaves the
+# rider UNDER_REVIEW with one document bounced. For that row the vendor column
+# carries the document type to reject and reason carries the comment shown to
+# the rider.
 RIDERS=$(cat <<'ROWS'
 Rahul Kumar|rahul.kumar@example.com|+919810000001|1995-01-12|A-123 Krishna Nagar, Delhi|Village Rampur, Bihar|234512340001|UNDER_REVIEW||
 Imran Sheikh|imran.sheikh@example.com|+919810000002|1998-03-22|12 Nehru Colony, Bhopal|12 Nehru Colony, Bhopal|234512340002|UNDER_REVIEW||
 Priya Nair|priya.nair@example.com|+919810000003|1996-07-08|44 MG Road, Kochi|44 MG Road, Kochi|234512340003|UNDER_REVIEW||
 Vikram Rathore|vikram.rathore@example.com|+919810000004|1992-11-30|7 Civil Lines, Jaipur|Sikar, Rajasthan|234512340004|UNDER_REVIEW||
+Neha Bansal|neha.bansal@example.com|+919810000005|1997-06-14|18 Sector 22, Chandigarh|Ludhiana, Punjab|234512340011|DOC_REJECTED|PAN|PAN photo is blurred - please upload a clearer one
+Farhan Qureshi|farhan.qureshi@example.com|+919810000006|1995-12-01|3 Banjara Hills, Hyderabad|Warangal, Telangana|234512340012|DOC_REJECTED|DRIVING_LICENSE|Driving licence has expired - upload a valid one
 Aman Singh|aman.singh@example.com|+919820000001|1997-05-15|B-45 Malviya Nagar, Jaipur|Sikar, Rajasthan|234512340005|APPROVED|V1|
 Ravi Patel|ravi.patel@example.com|+919820000002|1993-08-05|C-89 SG Highway, Ahmedabad|Anand, Gujarat|234512340006|APPROVED|V1|
 Sunita Devi|sunita.devi@example.com|+919820000003|1999-02-18|22 Gomti Nagar, Lucknow|Barabanki, UP|234512340007|APPROVED|V2|
@@ -136,7 +163,9 @@ while IFS='|' read -r name email phone dob temp perm aadhaar status vendor reaso
 
   RT=$(rider_token "$name" "$email" "$phone")
 
-  # PROFILE_PENDING riders stop here: verified phone, nothing submitted.
+  # PROFILE_PENDING riders stop here: verified phone, nothing submitted. Riders
+  # already APPROVED/REJECTED from an earlier run refuse these writes (400) -
+  # harmless, since curl doesn't fail the script on an HTTP error status.
   if [ "$status" != "PROFILE_PENDING" ]; then
     submit_profile "$RT" "$dob" "$temp" "$perm" "$aadhaar"
   fi
@@ -155,6 +184,9 @@ while IFS='|' read -r name email phone dob temp perm aadhaar status vendor reaso
         -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
         -d "{\"reason\":\"$reason\"}"
       ;;
+    DOC_REJECTED)
+      reject_document "$(rider_id_by_phone "$phone")" "$vendor" "$reason"
+      ;;
   esac
 done <<< "$RIDERS"
 
@@ -164,3 +196,7 @@ for s in PROFILE_PENDING UNDER_REVIEW APPROVED REJECTED; do
   n=$(curl -sS "$API/admin/riders?status=$s&limit=1" -H "Authorization: Bearer $TOKEN" | json '["total"]')
   printf '    %-16s %s\n' "$s" "$n"
 done
+
+d=$(curl -sS "$API/admin/riders?status=UNDER_REVIEW&limit=100" -H "Authorization: Bearer $TOKEN" \
+  | python3 -c "import sys,json;print(sum(1 for r in json.load(sys.stdin)['riders'] if r['hasRejectedDocs']))")
+printf '    %-16s %s\n' "of which doc-rejected" "$d"

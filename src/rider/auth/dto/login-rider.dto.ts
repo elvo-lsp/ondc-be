@@ -1,6 +1,6 @@
-import { IsPhoneNumber } from 'class-validator';
+import { IsEmail } from 'class-validator';
 
 export class LoginRiderDto {
-  @IsPhoneNumber('IN')
-  phone: string;
+  @IsEmail()
+  email: string;
 }
