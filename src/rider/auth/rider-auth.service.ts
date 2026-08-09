@@ -7,6 +7,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { randomInt } from 'crypto';
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../redis/redis.service';
 import { Prisma, RiderStatus } from '../../../generated/prisma/client';
@@ -20,7 +21,7 @@ const OTP_TTL_SECONDS = 5 * 60;
 interface OtpPayload {
   code: string;
   name?: string;
-  email?: string;
+  phone?: string;
 }
 
 /**
@@ -36,6 +37,27 @@ interface OtpPayload {
  */
 export function normaliseEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+/**
+ * Phones are stored E.164 for the same reason as emails: the unique index is on
+ * the raw string, and `IsPhoneNumber('IN')` accepts `+919864886447`,
+ * `09864886447`, `9864886447` and `+91 98648 86447` as the same number - so
+ * without this one person registers four times, each a separate rider.
+ */
+export function normalisePhone(phone: string): string {
+  return parsePhoneNumberFromString(phone.trim(), 'IN')?.number ?? phone.trim();
+}
+
+// Prisma's P2002 meta.target is `string[] | string | undefined` depending on the
+// driver, never a plain object - so this can join it safely without risking the
+// "[object Object]" stringification the lint rule guards against generally.
+function uniqueConstraintTarget(
+  err: Prisma.PrismaClientKnownRequestError,
+): string {
+  const target = err.meta?.target;
+  if (Array.isArray(target)) return target.join(',');
+  return typeof target === 'string' ? target : '';
 }
 
 /** A malformed value reads as "no OTP issued", so the caller gets a 401 not a 500. */
@@ -61,25 +83,33 @@ export class RiderAuthService {
     private readonly config: ConfigService,
   ) {}
 
+  /**
+   * The onboarding app verifies by email end to end - this and `verifyOtp` are
+   * the signup half, `login`/`verifyLoginOtp` the returning-rider half. Phone is
+   * collected and stored (unique, `IsPhoneNumber('IN')` format-checked) but never
+   * proven here. The private operations app, not built yet, is where phone OTP
+   * belongs - see docs/rider/onboarding-api.md.
+   */
   async register(dto: RegisterRiderDto): Promise<{ message: string }> {
-    const GENERIC_MESSAGE = 'If this is a new number, an OTP has been sent';
-
     const email = normaliseEmail(dto.email);
+    const phone = normalisePhone(dto.phone);
 
     const existing = await this.prisma.rider.findFirst({
-      where: { OR: [{ email }, { phone: dto.phone }] },
+      where: { OR: [{ email }, { phone }] },
     });
 
+    // A returning rider uses onboarding/login, not this.
     if (existing) {
-      await this.issueOtp(existing.phone);
-      return { message: GENERIC_MESSAGE };
+      throw new ConflictException(
+        'An account with this email or phone number already exists',
+      );
     }
 
-    // No Postgres write here - the rider is only created once the phone is proven
-    // via verifyOtp. Pending name/email travel with the OTP in Redis.
-    await this.issueOtp(dto.phone, { name: dto.name, email });
+    // No Postgres write here - the rider is only created once the email is
+    // proven via verifyOtp. Pending name/phone travel with the OTP in Redis.
+    await this.issueRegistrationOtp(email, { name: dto.name, phone });
 
-    return { message: GENERIC_MESSAGE };
+    return { message: 'An OTP has been sent' };
   }
 
   /**
@@ -137,23 +167,24 @@ export class RiderAuthService {
   async verifyOtp(
     dto: VerifyOtpDto,
   ): Promise<{ accessToken: string; status: RiderStatus }> {
-    let rider = await this.prisma.rider.findUnique({
-      where: { phone: dto.phone },
-    });
+    const email = normaliseEmail(dto.email);
 
-    const raw = await this.redis.get(this.otpKey(dto.phone));
+    let rider = await this.prisma.rider.findUnique({ where: { email } });
+
+    const key = this.registrationOtpKey(email);
+    const raw = await this.redis.get(key);
     const stored = readOtpPayload(raw);
 
     if (!stored || stored.code !== dto.code) {
       throw new UnauthorizedException('Invalid or expired OTP');
     }
 
-    await this.redis.del(this.otpKey(dto.phone));
+    await this.redis.del(key);
 
     if (!rider) {
-      // register() always stores name/email for a brand-new phone - a
-      // missing one means a stale/malformed entry.
-      if (!stored.name || !stored.email) {
+      // register() always stores name/phone for a brand-new email - a missing
+      // one means a stale/malformed entry.
+      if (!stored.name || !stored.phone) {
         throw new UnauthorizedException('Invalid or expired OTP');
       }
 
@@ -161,8 +192,8 @@ export class RiderAuthService {
         rider = await this.prisma.rider.create({
           data: {
             name: stored.name,
-            email: stored.email,
-            phone: dto.phone,
+            email,
+            phone: stored.phone,
             status: RiderStatus.PROFILE_PENDING,
             partnerId: await this.resolveDefaultPartnerId(),
           },
@@ -172,10 +203,15 @@ export class RiderAuthService {
           err instanceof Prisma.PrismaClientKnownRequestError &&
           err.code === 'P2002'
         ) {
-          // Two phones raced to verify with the same email. Safe to reveal
-          // here (unlike register()) since this rider already proved phone ownership.
+          // This email just proved ownership via OTP, so a collision on it here
+          // is only a concurrent verify of the same signup - not worth a
+          // different message. A phone collision is a genuinely different
+          // account. Safe to name which, unlike register(), since this request
+          // already proved it controls the email it is complaining about.
           throw new ConflictException(
-            'This email is already associated with another account',
+            uniqueConstraintTarget(err).includes('phone')
+              ? 'This phone number is already registered to another account'
+              : 'This email is already registered',
           );
         }
         throw err;
@@ -191,23 +227,23 @@ export class RiderAuthService {
     return { accessToken, status: rider.status };
   }
 
-  private async issueOtp(
-    phone: string,
-    pending?: { name: string; email: string },
+  private async issueRegistrationOtp(
+    email: string,
+    pending?: { name: string; phone: string },
   ): Promise<void> {
     const code = randomInt(100000, 1000000).toString();
     const payload: OtpPayload = { code, ...pending };
 
     await this.redis.set(
-      this.otpKey(phone),
+      this.registrationOtpKey(email),
       JSON.stringify(payload),
       'EX',
       OTP_TTL_SECONDS,
     );
 
-    // TODO: send via real SMS provider - stubbed for now
+    // TODO: send via a real mail provider - stubbed for now, same as login.
     this.logger.log(
-      `OTP for ${phone}: ${code} (expires in ${OTP_TTL_SECONDS / 60}m)`,
+      `Registration OTP for ${email}: ${code} (expires in ${OTP_TTL_SECONDS / 60}m)`,
     );
   }
 
@@ -236,11 +272,12 @@ export class RiderAuthService {
     });
   }
 
-  private otpKey(phone: string): string {
-    return `rider-otp:${phone}`;
+  // Separate namespace from the login OTP - see verifyLoginOtp. A code here can
+  // create a rider; a login code must never be redeemable against this key.
+  private registrationOtpKey(email: string): string {
+    return `rider-otp:${normaliseEmail(email)}`;
   }
 
-  // Separate namespace from the registration OTP - see verifyLoginOtp.
   private loginOtpKey(email: string): string {
     return `rider-login-otp:${normaliseEmail(email)}`;
   }

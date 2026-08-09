@@ -2,7 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
-  NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -14,6 +14,10 @@ import { AadhaarService } from '../../aadhaar/aadhaar.service';
 import { RiderDocumentsService } from '../documents/rider-documents.service';
 import { REQUIRED_DOCUMENT_TYPES } from '../documents/required-documents';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+
+// 401, not 404: riderId comes from a verified JWT, so a missing row means the
+// token is stale. Only a 401 makes the apps clear the session.
+const SESSION_GONE = 'Your session is no longer valid, please sign in again';
 
 /**
  * `APPROVED` is excluded so the documents behind an approval cannot move under it;
@@ -133,7 +137,7 @@ export class RiderProfileService {
     });
 
     if (!rider) {
-      throw new NotFoundException('Rider not found');
+      throw new UnauthorizedException(SESSION_GONE);
     }
 
     const [documents, outstandingDocuments] = await Promise.all([
@@ -162,7 +166,7 @@ export class RiderProfileService {
     });
 
     if (!rider) {
-      throw new NotFoundException('Rider not found');
+      throw new UnauthorizedException(SESSION_GONE);
     }
 
     if (!EDITABLE_STATUSES.includes(rider.status)) {

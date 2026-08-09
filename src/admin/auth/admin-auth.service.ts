@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  NotFoundException,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { randomBytes } from 'crypto';
 import * as argon2 from 'argon2';
@@ -48,7 +44,11 @@ export class AdminAuthService {
     });
 
     if (!admin) {
-      throw new NotFoundException('Admin not found');
+      // 401, not 404: adminId comes from a verified JWT, so a missing row means
+      // the token is stale. Only a 401 makes the panel clear the session.
+      throw new UnauthorizedException(
+        'Your session is no longer valid, please sign in again',
+      );
     }
 
     return {

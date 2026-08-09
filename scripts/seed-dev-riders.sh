@@ -29,6 +29,9 @@ trap 'rm -rf "$TMP"' EXIT
 # endpoint only serves an inline image for allowlisted types - so use .png.
 printf 'fake-document-bytes' > "$TMP/doc.png"
 
+# Every python3 -c below stays on ONE line. A multi-line -c argument is mangled
+# by Windows shims (pyenv-win wraps python in a .bat), which fails with a
+# confusing IndentationError rather than anything that points here.
 json() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
 admin_token() {
@@ -48,12 +51,12 @@ rider_token() {
     -d "{\"name\":\"$name\",\"email\":\"$email\",\"phone\":\"$phone\"}"
 
   local otp
-  otp=$(docker exec "$REDIS_CONTAINER" redis-cli --no-raw GET "rider-otp:$phone" \
+  otp=$(docker exec "$REDIS_CONTAINER" redis-cli --no-raw GET "rider-otp:$email" \
     | python3 -c 'import sys,json;print(json.loads(json.loads(sys.stdin.read().strip()))["code"])')
 
   curl -sS -X POST "$API/rider/auth/verify-otp" \
     -H 'Content-Type: application/json' \
-    -d "{\"phone\":\"$phone\",\"code\":\"$otp\"}" \
+    -d "{\"email\":\"$email\",\"code\":\"$otp\"}" \
     | json '["accessToken"]'
 }
 
@@ -79,12 +82,7 @@ reject_document() {
   local rider_id="$1" type="$2" comment="$3" doc_id
 
   doc_id=$(curl -sS "$API/admin/riders/$rider_id" -H "Authorization: Bearer $TOKEN" \
-    | python3 -c "
-import sys,json
-want=sys.argv[1]
-docs=json.load(sys.stdin)['documents']
-print(next((d['id'] for d in docs if d['type']==want and not d['supersededAt']), ''))
-" "$type")
+    | python3 -c "import sys,json;want=sys.argv[1];docs=json.load(sys.stdin)['documents'];print(next((d['id'] for d in docs if d['type']==want and not d['supersededAt']), ''))" "$type")
 
   curl -sS -o /dev/null -X POST "$API/admin/riders/$rider_id/documents/$doc_id/review" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -101,11 +99,7 @@ rider_id_by_phone() {
 
 vendor_id_by_name() {
   curl -sS "$API/admin/vendors?includeInactive=true" -H "Authorization: Bearer $TOKEN" \
-    | python3 -c "
-import sys,json
-name=sys.argv[1]
-print(next((v['id'] for v in json.load(sys.stdin) if v['name']==name), ''))
-" "$1"
+    | python3 -c "import sys,json;name=sys.argv[1];print(next((v['id'] for v in json.load(sys.stdin) if v['name']==name), ''))" "$1"
 }
 
 ensure_vendor() {
@@ -163,9 +157,9 @@ while IFS='|' read -r name email phone dob temp perm aadhaar status vendor reaso
 
   RT=$(rider_token "$name" "$email" "$phone")
 
-  # PROFILE_PENDING riders stop here: verified phone, nothing submitted. Riders
-  # already APPROVED/REJECTED from an earlier run refuse these writes (400) -
-  # harmless, since curl doesn't fail the script on an HTTP error status.
+  # PROFILE_PENDING riders stop here: verified, nothing submitted. Riders already
+  # APPROVED/REJECTED from an earlier run refuse these writes (400) - harmless,
+  # since curl doesn't fail the script on an HTTP error status.
   if [ "$status" != "PROFILE_PENDING" ]; then
     submit_profile "$RT" "$dob" "$temp" "$perm" "$aadhaar"
   fi

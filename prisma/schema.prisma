@@ -95,9 +95,11 @@ model Rider {
   name String
   /// Always lowercased - see RiderAuthService.normaliseEmail. The unique index is
   /// case-sensitive, so normalising on write is what makes one address one rider.
-  email String @unique
-  phone     String      @unique
-  status    RiderStatus @default(PROFILE_PENDING)
+  email  String @unique
+  /// Always E.164 - see RiderAuthService.normalisePhone. Same reasoning: the
+  /// validator accepts several formats for one number, the index does not.
+  phone  String @unique
+  status RiderStatus @default(PROFILE_PENDING)
 
   /// Set at signup from DEFAULT_PARTNER_CODE. Scopes every admin query.
   partnerId String

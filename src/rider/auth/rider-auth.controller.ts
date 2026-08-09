@@ -20,7 +20,7 @@ export class RiderAuthController {
     return this.riderAuthService.register(dto);
   }
 
-  /** Signup verification - phone OTP, and the only path that creates a rider. */
+  /** Signup verification - email OTP, and the only path that creates a rider. */
   @Post('verify-otp')
   verifyOtp(@Body() dto: VerifyOtpDto) {
     return this.riderAuthService.verifyOtp(dto);

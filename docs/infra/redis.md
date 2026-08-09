@@ -6,13 +6,13 @@ Rider OTPs are the only thing in Redis - both the signup one and the login one.
 
 Both live in `src/rider/auth/rider-auth.service.ts` with a 5-minute TTL (`EX 300`), under **two deliberately separate key namespaces**:
 
-### `rider-otp:{phone}` - signup, sent by SMS
+### `rider-otp:{email}` - signup, sent by email
 
 ```json
-{ "code": "123456", "name": "Rahul Kumar", "email": "rahul@example.com" }
+{ "code": "123456", "name": "Rahul Kumar", "phone": "+919876543210" }
 ```
 
-`name` and `email` ride along with the OTP because no `Rider` row exists yet - it is created on successful verification, from exactly these values. They are absent when `register` is called for an already-existing rider (it just resends a code).
+`name` and `phone` ride along with the OTP because no `Rider` row exists yet - it is created on successful verification, from exactly these values. They are absent when `register` matches an existing rider by email *or* phone: the code then goes to that rider's own email instead, with nothing to carry.
 
 ### `rider-login-otp:{email}` - returning-rider login, sent by email
 
@@ -27,7 +27,7 @@ Both live in `src/rider/auth/rider-auth.service.ts` with a 5-minute TTL (`EX 300
 ## Why Redis instead of Postgres for this
 
 - OTPs are inherently short-lived - Redis's native key expiry means no cleanup job is needed, unlike a DB table where expired rows would just accumulate.
-- Naturally a pure key-value lookup (phone -> current code), not relational data.
+- Naturally a pure key-value lookup (email -> current code), not relational data.
 - Losing this data (e.g. a Redis restart) is low-stakes - the rider retries, and nothing durable is gone. That is a very different risk profile from data backing a guaranteed async callback, which would need real durability; OTPs don't.
 
 Only the transient OTP lives here; rider identity, status and profile are all Postgres. The one wrinkle is that a flush drops the pending name/email of anyone mid-registration, so they re-submit the registration form rather than just asking for a new code. A flush costs a logging-in rider nothing beyond requesting a fresh code.

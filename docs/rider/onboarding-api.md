@@ -6,25 +6,30 @@ Covers `src/rider/auth/`, `src/rider/documents/` and `src/rider/profile/` - the 
 
 Signup sits at the top level (`register`, `verify-otp`) because only one app can ever call it: a rider registers through the public onboarding app and nowhere else. **Login is namespaced per app** (`onboarding/*`), because the two rider apps log in differently and both will exist - see [Two logins](#two-logins) below.
 
-### `POST /rider/auth/register`
-Body: `{ name: string, email: string, phone: string }` (`phone` validated as an Indian number via `IsPhoneNumber('IN')`).
+The onboarding app verifies **everything by email** - registration and login both. Phone is collected and stored (`IsPhoneNumber('IN')` format-checked, unique) but never proven here; real phone verification belongs to the private operations app, not built yet.
 
-**Does not write to Postgres.** If the email/phone already belongs to an existing (already-verified) rider, silently resends an OTP to that rider's real phone instead of erroring. Otherwise, stores `{ code, name, email }` in Redis keyed by phone (5-minute TTL) - the actual `Rider` row only gets created on successful `verify-otp` below. Response is identical in both cases:
+### `POST /rider/auth/register`
+Body: `{ name: string, email: string, phone: string }`.
+
+**Does not write to Postgres.** Checks both fields for an existing rider first: if either the email *or* the phone already belongs to one, returns `409 Conflict` and issues no OTP at all - a returning rider uses `onboarding/login` instead. Otherwise stores `{ code, name, phone }` in Redis keyed by email (5-minute TTL) - the actual `Rider` row only gets created on successful `verify-otp` below.
 ```json
-{ "message": "If this is a new number, an OTP has been sent" }
+{ "message": "An OTP has been sent" }
 ```
-This is deliberate for two reasons: account-enumeration prevention - never rely on the response to infer whether an account existed - and avoiding orphaned rows from abandoned signups or phone-number typos, since re-registering with a corrected number before ever verifying just works when nothing was persisted for the first attempt.
 
 ### `POST /rider/auth/verify-otp`
-Body: `{ phone: string, code: string }` (6 digits).
+Body: `{ email: string, code: string }` (6 digits).
 
-Verifies the OTP (stored in Redis, see `docs/infra/redis.md`, 5-minute TTL). **This is the only endpoint that creates a `Rider`.** If this is the first successful verification for this phone (no `Rider` row yet), creates the row now using the name/email stashed alongside the OTP, directly at `status: PROFILE_PENDING` - there's no earlier "unverified" status. The row's `partnerId` is resolved from the `DEFAULT_PARTNER_CODE` env var, since the onboarding app serves a single logistics partner today (see `docs/admin/README.md`); `vendorId` stays null until an admin approves the rider. If the rider already exists (a re-verification), their status is left untouched. Either way, issues a JWT and consumes the OTP.
+Verifies the OTP (stored in Redis, see `docs/infra/redis.md`, 5-minute TTL) and creates the `Rider` from the name/phone stashed alongside it, at `status: PROFILE_PENDING` - there's no earlier "unverified" status. The row's `partnerId` is resolved from the `DEFAULT_PARTNER_CODE` env var, since the onboarding app serves a single logistics partner today (see `docs/admin/README.md`); `vendorId` stays null until an admin approves the rider. Issues a JWT and consumes the OTP.
 ```json
 { "accessToken": "<jwt>", "status": "PROFILE_PENDING" }
 ```
-A wrong code returns `401 { "message": "Invalid or expired OTP" }` **without** consuming the real OTP - the rider can retry until it actually expires. The same 401 is returned if no OTP was ever issued for this phone at all (enumeration-safe), and if the stored value is unparseable. If two different phone numbers race to verify with the same pending email, the second one to complete gets `409 Conflict` - by that point the rider has already proven phone ownership, so revealing the conflict isn't an enumeration concern.
+A wrong code returns `401 { "message": "Invalid or expired OTP" }` **without** consuming the real OTP - the rider can retry until it actually expires. The same 401 is returned if no OTP was ever issued for this email at all (enumeration-safe), and if the stored value is unparseable. A race is still possible between two signups that both passed `register`'s check before either had created a row; it surfaces as `409 Conflict` naming which field collided.
 
-The issued JWT carries `{ sub: riderId, phone, app: 'onboarding' }` - `app` is checked by the guard below, so this token cannot be used against the future operations app.
+The issued JWT carries `{ sub: riderId, phone, app: 'onboarding' }` - `phone` here is a claim about identity, not proof; `app` is checked by the guard below, so this token cannot be used against the future operations app.
+
+#### Phones are normalised on write, same reasoning as email
+
+`Rider.phone` is stored **E.164** (`RiderAuthService.normalisePhone`), because `IsPhoneNumber('IN')` accepts `+919864886447`, `09864886447`, `9864886447` and `+91 98648 86447` as the same number. Without normalising, one person registering with slightly different formatting each time was four separate riders sharing a real-world phone. The migration folds existing rows the same way `LOWER()` does for email, and fails loudly on a genuine collision rather than picking a winner.
 
 ### `POST /rider/auth/onboarding/login`
 Body: `{ email: string }`.
@@ -41,7 +46,7 @@ Email rather than phone, deliberately. This endpoint exists for the rider who re
 `Rider.email` is stored **lowercased** (`RiderAuthService.normaliseEmail`), and every lookup is an exact `findUnique`. Both halves of that sentence matter:
 
 - **Never use `mode: 'insensitive'` here.** Prisma compiles it to `ILIKE`, which treats the value as a *pattern*. `@IsEmail()` happily accepts `%` and `_` in a local part, so `{"email":"%@gmail.com"}` would match an arbitrary rider and send *them* a login OTP - the caller needing to know no real address at all. It also breaks honest riders: `john_doe@gmail.com` would match `john.doe@gmail.com`, so a code could be mailed to the wrong inbox and the real owner could never log in.
-- **Normalising is what makes the unique index mean anything.** Postgres compares text case-sensitively, so without it `a@x.com` and `A@x.com` are two separate riders sharing one lowercased OTP key - and a code issued for one could mint a token for the other. Registration only ever proves the phone, so both rows really can exist.
+- **Normalising is what makes the unique index mean anything.** Postgres compares text case-sensitively, so without it `a@x.com` and `A@x.com` are two separate riders sharing one lowercased OTP key - and a code issued for one could mint a token for the other.
 
 The migration folds existing addresses with `LOWER()`. If two rows differ only by case it fails loudly rather than silently picking a winner - that is two riders claiming one address, which is a decision for a person.
 
@@ -52,7 +57,7 @@ Body: `{ email: string, code: string }` (6 digits).
 
 Same `{ accessToken, status }` response as `verify-otp`, and the same `app: 'onboarding'` token.
 
-**Never creates a rider.** That is the whole reason this is a separate endpoint rather than `verify-otp` accepting either identifier: `verify-otp` is the tail of registration and can insert a row, and a login OTP must not be redeemable against a path that can. They also use separate Redis namespaces (`rider-login-otp:{email}` vs `rider-otp:{phone}`) so a code issued by one cannot be spent on the other.
+**Never creates a rider.** That is the whole reason this is a separate endpoint rather than `verify-otp` doubling as both: `verify-otp` is the tail of registration and can insert a row, and a login OTP must not be redeemable against a path that can. Both are now keyed by email, so they additionally use separate Redis namespaces (`rider-login-otp:{email}` vs `rider-otp:{email}`) rather than being distinguished by field alone.
 
 An unknown address returns the same `401 Invalid or expired OTP` as a wrong code, so login stays enumeration-safe end to end.
 
@@ -63,7 +68,7 @@ There are two rider apps and they do not share a login:
 | | Onboarding app (Play Store) | Operations app (private) |
 | --- | --- | --- |
 | Route prefix | `/rider/auth/onboarding/*` | `/rider/auth/operations/*` |
-| Channel | email OTP | phone OTP (expected) |
+| Channel | email OTP (signup **and** login) | phone OTP (expected) |
 | Token `app` claim | `onboarding` | `operations` |
 | Status gate | any status | `APPROVED` only |
 | Built? | yes | **no** |

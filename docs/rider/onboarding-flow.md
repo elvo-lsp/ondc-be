@@ -9,7 +9,7 @@ Two separate rider-facing apps, same backend:
 
 1. Rider downloads the onboarding app.
 2. Enters name, email, phone number.
-3. Verifies **signup** via **phone OTP** (SMS) - not email. Matches how existing platforms (e.g. Zomato Delivery Partner) verify riders during signup. Email is verified separately, by being the login channel (step 3a).
+3. Verifies **signup** via **email OTP**. Phone is collected and stored (format-checked, unique) but not proven here - see [Coming back to a half-finished application](#coming-back-to-a-half-finished-application) for why the onboarding app verifies by email throughout.
 4. **No `Rider` row is created until this OTP verification actually succeeds** - name/email/phone are held in Redis alongside the OTP until then, not written to Postgres on signup. This is deliberate: avoids orphaned/unverified rows piling up from abandoned signups, bot attempts, or typos, and specifically fixes a bug where a typo'd phone number would otherwise permanently block re-registering with the corrected one (see git history/`onboarding-api.md` for the mechanism). On successful verification, the row is created directly at `PROFILE_PENDING` and the rider is issued a limited-scope "onboarding" token - enough to access the profile/document screens, but not a fully onboarded rider yet.
 5. Rider completes their profile and uploads the required documents: **Aadhaar, PAN and driving licence**. The list lives in one place (`REQUIRED_DOCUMENT_TYPES`) and is expected to grow - vehicle RC and insurance are the likely next entries.
 6. Submission moves the rider into a **pending review** state. It happens automatically once profile *and* documents are both complete; there is no separate "submit" button.
@@ -28,10 +28,10 @@ The admin half of steps 7-8 is built - see [`../admin/README.md`](../admin/READM
 
 A rider can log out, uninstall the app, or just lose the token - and the application they left behind is the thing they need to get back to. So the onboarding app has a **login**, not only a registration form:
 
-- **Signup** proves the phone, over SMS.
-- **Login** proves the email, over an email OTP: `POST /rider/auth/onboarding/login`.
+- **Signup** proves the email, over an email OTP: `POST /rider/auth/verify-otp`.
+- **Login** proves the same email, over a separate email OTP: `POST /rider/auth/onboarding/login`.
 
-Email for login because a returning rider is likelier to still have their inbox than to remember which number they signed up with, and the address is already collected here for the approval notification. Between the two, both contact details end up verified.
+Email throughout, deliberately - a returning rider is likelier to still have their inbox than to remember which number they signed up with. Phone is still collected and stored (unique, format-checked), which is also what closes a real bug: without checking it too, the same person registering with `+919876543210`, `09876543210` and `9876543210` used to become three separate riders, and someone could even take over another rider's signup by typing their phone number with a different email. Registration now checks both fields for an existing account before issuing a code, and sends it to the real owner's email either way - see [`onboarding-api.md`](./onboarding-api.md).
 
 The two rider apps get **separate logins** - the onboarding app's email OTP, and a future phone-OTP login for the operations app gated on `status === APPROVED`. Neither token works against the other app; see [`onboarding-api.md`](./onboarding-api.md#two-logins).
 

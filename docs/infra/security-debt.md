@@ -9,11 +9,9 @@ Each item says what the actual exposure is, not just what's missing. "Must fix" 
 ## Must fix before production
 
 ### OTPs logged in plaintext
-`RiderAuthService.issueOtp` logs the signup OTP, and `issueEmailOtp` logs the login OTP. Dev stubs while neither the SMS nor the mail provider is wired up, but it means anyone with log read access - log aggregators, staging environments, support tooling - can read a rider's OTP and log in as them with no access to their phone or inbox.
+`RiderAuthService.issueRegistrationOtp` logs the signup OTP, and `issueEmailOtp` logs the login OTP. Both are email OTPs now, and both are dev stubs while no mail provider is wired up - anyone with log read access (log aggregators, staging environments, support tooling) can read a rider's code and sign in as them with no access to their inbox at all.
 
-The email one is the worse of the two: it is a full login for an existing rider, whereas the SMS one at least still needs a registered/unclaimed phone.
-
-**Fix:** remove both, or guard them to non-production only, when the real providers go in. Don't leave them "just in case."
+**Fix:** remove both, or guard them to non-production only, when a real mail provider goes in. Don't leave them "just in case."
 
 ### Aadhaar encryption keys live in `.env`
 The numbers themselves are encrypted (see [aadhaar.md](./aadhaar.md)) - this entry is about the keys. `AADHAAR_ENCRYPTION_KEY` and `AADHAAR_HASH_PEPPER` sit in a `.env` file, and neither can be rotated in place: changing the key makes every stored number undecryptable, changing the pepper breaks duplicate detection.
@@ -28,7 +26,7 @@ The numbers themselves are encrypted (see [aadhaar.md](./aadhaar.md)) - this ent
 ### Admin login is not rate limited
 `POST /admin/auth/login` has no throttle. argon2 makes each attempt cost ~50-100ms of CPU, which slows credential stuffing, but that cost cuts both ways: it also makes this the cheapest way for an unauthenticated caller to burn server CPU.
 
-**Fix:** `@nestjs/throttler` on the route, keyed on IP **and** submitted email, before the panel is reachable from outside localhost. The rider OTP endpoints (`register`, `verify-otp`, `onboarding/login`, `onboarding/verify-login-otp`) need the same treatment - both verify routes let a caller retry a 6-digit code freely until it expires, which is ~10^6 guesses against a 5-minute window. `onboarding/login` additionally needs it because an unthrottled email OTP endpoint is a way to have the server send mail to an address of the caller's choosing once a provider is wired up.
+**Fix:** `@nestjs/throttler` on the route, keyed on IP **and** submitted email, before the panel is reachable from outside localhost. The rider OTP endpoints (`register`, `verify-otp`, `onboarding/login`, `onboarding/verify-login-otp`) need the same treatment - both verify routes let a caller retry a 6-digit code freely until it expires, which is ~10^6 guesses against a 5-minute window. `register` and `onboarding/login` additionally need it because either is an unthrottled way to have the server send mail to an address of the caller's choosing once a provider is wired up.
 
 ### Seeded admin password
 `prisma/seed.ts` reads `SEED_ADMIN_PASSWORD`, and `.env.example` ships `change-me`. There's no forced password change on first login and no password reset flow.
