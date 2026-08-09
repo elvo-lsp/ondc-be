@@ -14,8 +14,8 @@ Organized by surface, matching `src/` - if you're working on a feature, check th
 - [onboarding-api.md](./rider/onboarding-api.md) - API reference for `rider/auth`, `rider/documents` and `rider/profile`: endpoints, request/response shapes, the two per-app logins, document versioning, and the status auto-transition logic.
 
 ### admin/
-- [README.md](./admin/README.md) - how the admin domain is modelled: partner vs. vendor, why the tenant column exists before multi-partner does, how `partnerId` scoping is enforced, the review/approve/reject flow, and what's deliberately not built.
-- [admin-api.md](./admin/admin-api.md) - endpoint reference for `admin/auth`, `admin/vendors` and `admin/riders`.
+- [README.md](./admin/README.md) - how the admin domain is modelled: partner vs. vendor, vendor chains, the vendor geofence and needs flags, vendor contacts, why vendor onboarding stays shallow by design, why the tenant column exists before multi-partner does, how `partnerId` scoping is enforced, the review/approve/reject flow, and what's deliberately not built.
+- [admin-api.md](./admin/admin-api.md) - endpoint reference for `admin/auth`, `admin/vendors`, `admin/vendor-chains` and `admin/riders`.
 
 ### infra/
 - [security-debt.md](./infra/security-debt.md) - the single cross-surface list of known security gaps, what each actually exposes, and what's already fixed.

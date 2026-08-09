@@ -10,6 +10,7 @@ import { randomInt } from 'crypto';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../redis/redis.service';
+import { prismaUniqueConstraintFields } from '../../prisma/prisma-errors';
 import { Prisma, RiderStatus } from '../../../generated/prisma/client';
 import { RegisterRiderDto } from './dto/register-rider.dto';
 import { LoginRiderDto } from './dto/login-rider.dto';
@@ -47,17 +48,6 @@ export function normaliseEmail(email: string): string {
  */
 export function normalisePhone(phone: string): string {
   return parsePhoneNumberFromString(phone.trim(), 'IN')?.number ?? phone.trim();
-}
-
-// Prisma's P2002 meta.target is `string[] | string | undefined` depending on the
-// driver, never a plain object - so this can join it safely without risking the
-// "[object Object]" stringification the lint rule guards against generally.
-function uniqueConstraintTarget(
-  err: Prisma.PrismaClientKnownRequestError,
-): string {
-  const target = err.meta?.target;
-  if (Array.isArray(target)) return target.join(',');
-  return typeof target === 'string' ? target : '';
 }
 
 /** A malformed value reads as "no OTP issued", so the caller gets a 401 not a 500. */
@@ -209,7 +199,7 @@ export class RiderAuthService {
           // account. Safe to name which, unlike register(), since this request
           // already proved it controls the email it is complaining about.
           throw new ConflictException(
-            uniqueConstraintTarget(err).includes('phone')
+            prismaUniqueConstraintFields(err).includes('phone')
               ? 'This phone number is already registered to another account'
               : 'This email is already registered',
           );

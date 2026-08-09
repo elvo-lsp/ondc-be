@@ -37,9 +37,10 @@ model Partner {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  admins  AdminUser[]
-  vendors Vendor[]
-  riders  Rider[]
+  admins       AdminUser[]
+  vendors      Vendor[]
+  vendorChains VendorChain[]
+  riders       Rider[]
 }
 
 /// An admin panel login. Seeded only - no self-signup, no roles yet.
@@ -54,10 +55,34 @@ model AdminUser {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  reviewedRiders    Rider[]         @relation("RiderReviewedBy")
-  createdVendors    Vendor[]        @relation("VendorCreatedBy")
-  reviewedDocuments RiderDocument[] @relation("DocumentReviewedBy")
+  reviewedRiders      Rider[]         @relation("RiderReviewedBy")
+  createdVendors      Vendor[]        @relation("VendorCreatedBy")
+  createdVendorChains VendorChain[]   @relation("VendorChainCreatedBy")
+  reviewedDocuments   RiderDocument[] @relation("DocumentReviewedBy")
 
+  @@index([partnerId])
+}
+
+/// A brand grouping several Vendor rows under one owner, e.g. "Burger King"
+/// grouping its Andheri and Powai outlets. Optional - most vendors are
+/// independent and have no chain. Lives inside a partner, like Vendor; a chain
+/// belongs to exactly one partner and cannot group vendors across partners.
+model VendorChain {
+  id        String  @id @default(uuid())
+  partnerId String
+  partner   Partner @relation(fields: [partnerId], references: [id])
+
+  name String
+
+  createdByAdminId String?
+  createdByAdmin   AdminUser? @relation("VendorChainCreatedBy", fields: [createdByAdminId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vendors Vendor[]
+
+  @@unique([partnerId, name])
   @@index([partnerId])
 }
 
@@ -68,12 +93,35 @@ model Vendor {
   partnerId String
   partner   Partner @relation(fields: [partnerId], references: [id])
 
+  /// Groups this vendor under a brand - see VendorChain. Null for an
+  /// independent vendor, which is the common case.
+  chainId String?
+  chain   VendorChain? @relation(fields: [chainId], references: [id])
+
   name         String
+  /// Free-form business-assigned reference (e.g. an internal store code).
+  /// Optional and unique per partner when set - onboarding shouldn't block on
+  /// a code the admin doesn't have yet.
+  code         String?
   contactName  String?
   contactPhone String?
   contactEmail String?
   address      String?
   isActive     Boolean @default(true)
+
+  /// Where a rider must be to punch in at this vendor - see docs/admin/README.md.
+  /// All three are optional at creation and set later via edit; latitude and
+  /// longitude are required together, and geofenceRadiusMeters only makes
+  /// sense once a location is set.
+  latitude             Float?
+  longitude            Float?
+  geofenceRadiusMeters Int?
+
+  /// What this vendor needs a rider assigned to it to bring. Independent flags,
+  /// not one enum, because a future third requirement (e.g. cold storage)
+  /// should be an additive column, not a rename of every existing value.
+  needsRiders   Boolean @default(true)
+  needsVehicles Boolean @default(false)
 
   /// Nullable for the same reason as Rider.reviewedByAdminId: an admin can be
   /// removed without taking their vendors with them, and a vendor created by a
@@ -84,21 +132,41 @@ model Vendor {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  riders Rider[]
+  riders   Rider[]
+  contacts VendorContact[]
 
   @@unique([partnerId, name])
+  @@unique([partnerId, code])
   @@index([partnerId])
+  @@index([chainId])
+}
+
+/// A vendor's point of contact - name and role, up to 10 per vendor (enforced
+/// by the DTO, not here). Every write replaces the full set rather than diffing
+/// individual rows, since the admin panel always submits the vendor's complete
+/// current list - see AdminVendorsService.
+model VendorContact {
+  id       String @id @default(uuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id])
+
+  name        String
+  designation String?
+
+  createdAt DateTime @default(now())
+
+  @@index([vendorId])
 }
 
 model Rider {
-  id   String @id @default(uuid())
-  name String
+  id     String      @id @default(uuid())
+  name   String
   /// Always lowercased - see RiderAuthService.normaliseEmail. The unique index is
   /// case-sensitive, so normalising on write is what makes one address one rider.
-  email  String @unique
+  email  String      @unique
   /// Always E.164 - see RiderAuthService.normalisePhone. Same reasoning: the
   /// validator accepts several formats for one number, the index does not.
-  phone  String @unique
+  phone  String      @unique
   status RiderStatus @default(PROFILE_PENDING)
 
   /// Set at signup from DEFAULT_PARTNER_CODE. Scopes every admin query.
@@ -183,4 +251,3 @@ model RiderDocument {
   /// document forward to its replacement.
   @@index([supersededById])
 }
-

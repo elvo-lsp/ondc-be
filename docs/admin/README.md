@@ -13,6 +13,36 @@ So "multi-vendor" and "multi-partner" are unrelated features. Vendors are a norm
 
 Built now: the `Partner` table with `partnerId` FKs on `AdminUser`/`Vendor`/`Rider`, `partnerId` in the admin JWT, every admin query filtered by it, and full vendor CRUD. Deliberately **not** built: any way to create a partner over the API (they come from `prisma/seed.ts`), partner switching, per-partner config, or roles on `AdminUser` - there is no superadmin, and every admin has identical abilities inside their partner.
 
+## Vendor chains - a third axis, orthogonal to both
+
+A `VendorChain` groups several `Vendor` rows under one brand - "Burger King" grouping its Andheri and Powai outlets. Each outlet is still its own `Vendor` row with its own address, geofence and riders; the chain is purely a label plus a filter, not a second tenancy layer. `Vendor.chainId` is nullable because most vendors are independent - a chain is the exception, not the default shape.
+
+Deliberately a **separate model**, not a self-referential `Vendor.parentVendorId`. A self-reference would force every column that only makes sense at one level - `address`/geofence on an outlet, nothing outlet-specific on a chain root - to be nullable on both, and leaves "is this row a chain root or an independent vendor" indistinguishable without an extra flag. Splitting the models means a chain literally cannot hold an address or a rider, and an outlet literally cannot hold another outlet.
+
+Chains have no `isActive` - disabling happens per-outlet, and a chain with zero active outlets is already effectively inactive.
+
+## Vendor geofence - where a rider must be to punch in
+
+`Vendor.latitude`/`longitude`/`geofenceRadiusMeters` are optional at creation and editable later (`AdminVendorsService.resolveGeofenceFields`, `src/admin/vendors/geofence.ts`). Nothing reads them yet - punch-in isn't built - but the shape is settled now so that feature doesn't need a schema change later.
+
+- Latitude and longitude are required **together**. A radius with no location means nothing, and a half-set location is worse than none - it would silently geofence nobody able to be near it.
+- `geofenceRadiusMeters` defaults to 150 (a typical single-storefront radius, wide enough to absorb ordinary GPS drift) the first time a location is set, so an admin isn't required to type a number they'd almost always leave at the default.
+- Distance will be a plain Haversine calculation against the rider's reported lat/lng when punch-in is built - no PostGIS, no spatial index. One outlet's known coordinates compared per punch-in event is a single O(1) calculation; that only stops being true if the platform ever needs "nearest outlet to this point" queries across many rows, which is a different feature.
+
+## What a vendor needs from a rider
+
+`Vendor.needsRiders`/`needsVehicles` are independent booleans, not one enum. A vendor can need either, both, or neither (a walk-in-only store, say). Booleans rather than a `RIDERS_ONLY | VEHICLES_ONLY | BOTH | NEITHER` enum because the requirement list is expected to grow - a future "needs packaging" or "needs cold storage" is one new column, not a rename of every existing enum value plus a migration of every stored row.
+
+## Vendor onboarding is deliberately shallow
+
+`POST /admin/vendors` requires only `name`. Everything else - contact details, chain, geofence, code, points of contact - is fillable later through the same `PATCH` an edit uses. There's no "draft" vendor state or a second "complete the profile" step; a vendor with nothing but a name is a fully real, usable row from the moment it's created, just a sparse one. The alternative - a wizard, or required fields that block creation - would cost the admin a finished form up front for information they often don't have yet (a store's exact coordinates, say), for a benefit ondc-be doesn't need: nothing downstream requires a vendor to be "complete" before riders can be approved against it.
+
+### Vendor contacts
+
+Up to 10 `VendorContact` rows per vendor, each just `{ name, designation? }` - no phone or email. That's narrower than `Vendor.contactName`/`contactPhone`/`contactEmail`, which is the *one* contact a vendor already had before this existed and stays as-is; `contacts` is the list of *people* at the vendor an admin might need to know by name and role (a store manager, a shift supervisor), not a second communication channel. If that turns out to need its own phone/email later, add the columns then - there's no reason to speculate a per-contact channel nobody has asked for yet.
+
+Every write **replaces the full set**, never diffs against what's stored (`AdminVendorsService.update`: `contacts: { deleteMany: {}, create: contacts }` in one call). The alternative - matching incoming rows against existing ones by some client-supplied id, updating some, deleting others, inserting the rest - is real complexity for a list that's realistically edited by retyping it in a form each time, not by patching one entry among many. The panel's own contract follows from this: it always renders and submits the vendor's complete current list, never a partial one.
+
 ### Why the tenant column exists before it is needed
 
 This is the one piece of speculative structure here, so the reasoning is worth recording rather than rediscovering:

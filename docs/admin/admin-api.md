@@ -32,14 +32,20 @@ There is no signup, password reset or admin-creates-admin endpoint. Admins come 
 ## Vendors (`src/admin/vendors/`)
 
 ### `GET /admin/vendors`
-Query: `includeInactive` (bool, default false), `search` (case-insensitive name match).
+Query: `includeInactive` (bool, default false), `chainId` (uuid), `search` (case-insensitive name match).
 
-Returns vendors with an `approvedRiderCount` and a `createdByAdmin` (`{ id, name }`, or `null`). Inactive vendors are hidden by default so the vendor picker on the rider-approval screen only ever offers assignable ones.
+Returns vendors with an `approvedRiderCount`, a `chain` (`{ id, name }`, or `null`), and a `createdByAdmin` (`{ id, name }`, or `null`). Inactive vendors are hidden by default so the vendor picker on the rider-approval screen only ever offers assignable ones.
 
 ### `POST /admin/vendors`
-Body: `{ name: string, contactName?, contactPhone?, contactEmail?, address? }`. `contactPhone` is validated as an Indian number.
+Body: `{ name: string, code?, contactName?, contactPhone?, contactEmail?, address?, chainId?, latitude?, longitude?, geofenceRadiusMeters?, needsRiders?, needsVehicles?, contacts? }`. `contactPhone` is validated as an Indian number. Only `name` is required - everything else can be filled in later via `PATCH`, so onboarding a vendor isn't blocked on details an admin doesn't have yet.
 
-`partnerId` **and** the recorded creator are taken from the JWT, never the body. Duplicate name within the same partner returns `409` (names are unique per partner, not globally - two partners may both have a "Big Bazaar Andheri").
+`partnerId` **and** the recorded creator are taken from the JWT, never the body. Duplicate name within the same partner returns `409` (names are unique per partner, not globally - two partners may both have a "Big Bazaar Andheri"). `code` is unique per partner **when set**, and can otherwise be left out entirely. `chainId` must belong to the same partner - `404` otherwise, same as an unassignable vendor id anywhere else in this surface. The `409` message names whichever of `name`/`code` actually collided.
+
+`latitude`/`longitude` are optional but must be given together - `400` if only one is present. `geofenceRadiusMeters` is only meaningful once a location exists, so providing it without a location is `400`; providing a location without a radius defaults it to `150`. See [README.md](./README.md#vendor-geofence---where-a-rider-must-be-to-punch-in).
+
+`needsRiders` defaults to `true`, `needsVehicles` to `false`.
+
+`contacts` is an array of `{ name: string, designation?: string }`, max 10. Each becomes a `VendorContact` row. There's no per-contact phone/email here - see [README.md](./README.md#vendor-contacts) if that turns out to be needed later.
 
 `Vendor.createdByAdminId` is nullable, for the same reason as `Rider.reviewedByAdminId`: an admin can be removed without deleting their vendors, and a vendor seeded by a script has no admin to point at. Only `id` and `name` of the creating admin are ever selected - the relation must never widen to expose `email` or `passwordHash`.
 
@@ -49,7 +55,27 @@ Vendor detail plus its **approved** riders. `404` if the vendor belongs to anoth
 ### `PATCH /admin/vendors/:id`
 Body: any subset of the create fields, plus `isActive: boolean`.
 
+The geofence fields are merged onto the vendor's **current** values, not replaced wholesale - updating just `geofenceRadiusMeters` on a vendor that already has a location leaves that location untouched, and the same both-or-neither / default-to-150 rules apply to the merged result. Moving a vendor to a different chain (or out of one) is a normal `chainId` update; there is no dedicated endpoint for it.
+
+`contacts`, when present, **replaces the full set** rather than merging - omit the key to leave existing contacts untouched, or send `[]` to clear them all. There is no per-contact update; the panel always submits the vendor's complete current list.
+
 There is no delete. Vendors are soft-disabled via `isActive: false` because approved riders reference them; disabling only blocks *new* rider assignments and hides the vendor from the default list. Riders already assigned are untouched.
+
+## Vendor chains (`src/admin/vendor-chains/`)
+
+See [README.md](./README.md#vendor-chains---a-third-axis-orthogonal-to-both) for what a chain is and isn't.
+
+### `GET /admin/vendor-chains`
+Query: `search` (case-insensitive name match). Returns chains with a `vendorCount` and a `createdByAdmin`.
+
+### `POST /admin/vendor-chains`
+Body: `{ name: string }`. Same partner-scoped uniqueness and creator-from-JWT rules as vendors.
+
+### `GET /admin/vendor-chains/:id`
+Chain detail plus every vendor in it (`{ id, name, isActive, address }` each, active and inactive alike - unlike the vendor list, there's no default filter here).
+
+### `PATCH /admin/vendor-chains/:id`
+Body: `{ name?: string }`. Rename only - there is no delete, and no `isActive`; see [README.md](./README.md#vendor-chains---a-third-axis-orthogonal-to-both) for why a chain has no active state of its own.
 
 ## Riders (`src/admin/riders/`)
 
